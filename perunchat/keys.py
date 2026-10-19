@@ -105,13 +105,12 @@ class KeyStore:
         supported_runtime: Runtime | str,
         scopes: List[str],
         label: Optional[str] = None,
-        live: bool = False,
     ) -> tuple[str, AgentKey]:
         self._validate_agent_id(agent_id)
         if self._active_by_agent_id(agent_id) is not None:
             raise DuplicateAgentIdError(f"agent_id '{agent_id}' is already registered by an active key")
 
-        prefix = "prn_live_" if live else "prn_test_"
+        prefix = "prn_live_"
         raw = generate_api_key(prefix)
         key_hash = AgentKey.hash_raw_key(raw)
         key_prefix = raw[: len(prefix) + 8]
@@ -174,6 +173,27 @@ class KeyStore:
                 record.revoked_at = revoked_at
             return record
 
+    def revoke_by_owner(self, key_id: str, owner_id: str) -> Optional[AgentKey]:
+        """Revoke a key only if it belongs to *owner_id*."""
+        revoked_at = datetime.now(timezone.utc)
+        with db_module.db(self._db_uri()) as conn:
+            row = conn.execute(
+                "SELECT * FROM agent_keys WHERE id = ? AND owner_id = ? AND is_revoked = 0",
+                (key_id, owner_id),
+            ).fetchone()
+            if not row:
+                return None
+            conn.execute(
+                "UPDATE agent_keys SET is_revoked = 1, revoked_at = ? WHERE id = ?",
+                (revoked_at.isoformat(), key_id),
+            )
+            conn.commit()
+            record = self._row_to_record(row)
+            if record:
+                record.is_revoked = True
+                record.revoked_at = revoked_at
+            return record
+
     def update_scopes(self, key_id: str, scopes: List[str]) -> Optional[AgentKey]:
         with db_module.db(self._db_uri()) as conn:
             row = conn.execute("SELECT * FROM agent_keys WHERE id = ?", (key_id,)).fetchone()
@@ -198,9 +218,13 @@ class KeyStore:
             ).fetchone()
             return self._row_to_record(row) if row else None
 
-    def list(self) -> List[AgentKey]:
+    def list_by_owner(self, owner_id: str) -> List[AgentKey]:
+        """List keys belonging to a specific owner, newest first."""
         with db_module.db(self._db_uri()) as conn:
-            rows = conn.execute("SELECT * FROM agent_keys ORDER BY created_at DESC").fetchall()
+            rows = conn.execute(
+                "SELECT * FROM agent_keys WHERE owner_id = ? ORDER BY created_at DESC",
+                (owner_id,),
+            ).fetchall()
             return [self._row_to_record(row) for row in rows if row]
 
     def _row_to_record(self, row: Optional[sqlite3.Row]) -> Optional[AgentKey]:

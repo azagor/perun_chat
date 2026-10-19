@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import time
+import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -60,7 +61,6 @@ class CreateKeyRequest(BaseModel):
     supported_runtime: Runtime | str
     scopes: List[str]
     label: str | None = None
-    live: bool = False
 
 
 class ScopesPatch(BaseModel):
@@ -215,19 +215,30 @@ def _evict_stale_proposals() -> None:
 
 
 @router.post("/keys")
-def create_key(
+async def create_key(
     req: CreateKeyRequest,
     store: KeyStore = Depends(get_keystore),
     _: None = Depends(require_dashboard_secret),
 ) -> Dict[str, Any]:
+    """Create an agent key. Owner isolation is enforced server-side.
+
+    The public dashboard sends a shared placeholder owner_id; for real
+    self-serve registration we generate a unique owner_id here so each
+    browser/session only manages the keys it created.
+    """
+    from .gateway import gateway as _gateway
+    if not await _gateway.security.check_creation_allowed():
+        raise HTTPException(status_code=429, detail="key_creation_rate_limited")
+    owner_id = (req.owner_id or "").strip()
+    if not owner_id or owner_id == "dashboard-user":
+        owner_id = uuid.uuid4().hex
     try:
         raw, record = store.create(
-            owner_id=req.owner_id,
+            owner_id=owner_id,
             agent_id=req.agent_id,
             supported_runtime=req.supported_runtime,
             scopes=req.scopes,
             label=req.label,
-            live=req.live,
         )
     except DuplicateAgentIdError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
@@ -236,6 +247,7 @@ def create_key(
     return {
         "ok": True,
         "plaintext_key": raw,
+        "owner_id": record.owner_id,
         "key": {
             "id": record.id,
             "agent_id": record.agent_id,
@@ -271,13 +283,13 @@ def me(agent: AgentKey = Depends(get_current_agent)) -> Dict[str, Any]:
 
 @router.get("/keys")
 def list_keys(
+    caller: AgentKey = Depends(get_current_agent),
     store: KeyStore = Depends(get_keystore),
-    _: None = Depends(require_dashboard_secret),
 ) -> Dict[str, Any]:
+    """List keys owned by the caller. The API key itself is the credential."""
     keys = [
         {
             "id": k.id,
-            "owner_id": k.owner_id,
             "agent_id": k.agent_id,
             "label": k.label,
             "supported_runtime": k.supported_runtime,
@@ -286,7 +298,7 @@ def list_keys(
             "created_at": k.created_at.isoformat(),
             "revoked_at": k.revoked_at.isoformat() if k.revoked_at else None,
         }
-        for k in store.list()
+        for k in store.list_by_owner(caller.owner_id)
     ]
     return {"ok": True, "keys": keys}
 
@@ -294,12 +306,13 @@ def list_keys(
 @router.delete("/keys/{key_id}")
 def revoke_key(
     key_id: str,
+    caller: AgentKey = Depends(get_current_agent),
     store: KeyStore = Depends(get_keystore),
-    _: None = Depends(require_dashboard_secret),
 ) -> Dict[str, Any]:
-    record = store.revoke(key_id)
+    """Revoke a key. The caller must own it (same owner_id as their API key)."""
+    record = store.revoke_by_owner(key_id, caller.owner_id)
     if record is None:
-        raise HTTPException(status_code=404, detail="key_not_found")
+        raise HTTPException(status_code=404, detail="key_not_found_or_not_owned")
     return {"ok": True, "id": record.id, "revoked_at": record.revoked_at}
 
 

@@ -18,7 +18,7 @@ def test_create_key_returns_plaintext_once() -> None:
         agent_id="agent-1",
         supported_runtime="perun",
         scopes=["grp:belle-core:demo"],
-        live=True,
+
     )
     assert raw.startswith("prn_live_")
     assert record.key_hash != raw

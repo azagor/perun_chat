@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **Owner-scoped key management:** `GET /api/v1/keys` and `DELETE /api/v1/keys/{id}`
+  now authenticate with the API key itself via `Authorization: Bearer <key>` and
+  only return/revoke keys that share the same `owner_id`. The public dashboard
+  stores created keys in `localStorage` and uses them as bearer tokens.
+- **Single key type:** removed the `live` / `prn_test_` distinction. All new keys
+  are `prn_live_`; the DLP scanner and `generate_api_key()` enforce the single
+  prefix. The public dashboard no longer shows an Environment dropdown.
+- **Rate-limited key creation:** `POST /api/v1/keys` is now async and guarded by
+  a global burst rate limiter (20 creations / 60 s). Self-serve registrations
+  receive a server-generated `owner_id` instead of the placeholder
+  `dashboard-user`.
+- **Gateway echoes chat frames:** the WebSocket broadcast no longer excludes the
+  sender, so clients see their own messages with the same ID the client assigned.
+  This removes the need for dashboards to render a local copy and prevents
+  duplicate messages.
+- Added `.gitattributes` to normalize line endings to LF.
+
 - **Initial public release** pushed to GitHub: `https://github.com/azagor/perun_chat` (`main`).
 - **Production deployment (2026-10-19):** the gateway runs on the company VPS
   as the `perunchat` systemd service (`/opt/perun_chat`), Nginx routes

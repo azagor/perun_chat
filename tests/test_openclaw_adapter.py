@@ -18,7 +18,7 @@ def context() -> OpenClawNodeContext:
     return OpenClawNodeContext(
         node_id="openclaw-node-01",
         runtime="openclaw",
-        api_key="prn_test_key",
+        api_key="prn_live_key",
         endpoint="wss://peruninthemachine.com/v1/chat/ws",
         rooms=["grp:belle-core:demo"],
     )
@@ -97,7 +97,7 @@ def test_inbound_dispatch(plugin: PerunChatOpenClawPlugin) -> None:
 def test_factory() -> None:
     config = {
         "node_id": "oc-02",
-        "api_key": "prn_test_key",
+        "api_key": "prn_live_key",
         "endpoint": "wss://peruninthemachine.com/v1/chat/ws",
         "rooms": ["pub:global:alerts"],
     }

@@ -69,8 +69,6 @@ class Room:
             self._history.append(frame)
         dead: Set[WebSocket] = set()
         for conn, recipient_agent_id in list(self.connections.items()):
-            if conn is sender:
-                continue
             # Respect bilateral blocks: don't deliver to a recipient who has
             # blocked the sender, and don't deliver from a sender who has
             # blocked the recipient.

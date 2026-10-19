@@ -17,11 +17,11 @@ from perunchat.security import (
 
 
 def test_generate_api_key() -> None:
-    key = generate_api_key("prn_test_")
-    assert key.startswith("prn_test_")
-    assert len(key) > len("prn_test_")
+    key = generate_api_key("prn_live_")
+    assert key.startswith("prn_live_")
+    assert len(key) > len("prn_live_")
     with pytest.raises(ValueError):
-        generate_api_key("bad_")
+        generate_api_key("prn_test_")
 
 
 def test_dlp_redacts_perun_token() -> None:
@@ -96,7 +96,7 @@ def test_turn_counter_resets_on_operator_input() -> None:
 
 def test_security_pipeline_scan_egress() -> None:
     pipeline = SecurityPipeline()
-    frame = {"payload": "secret prn_test_deadbeef"}
+    frame = {"payload": "secret prn_live_deadbeef"}
     safe = pipeline.scan_egress(frame)
     assert "[REDACTED_SECRET]" in safe["payload"]
 

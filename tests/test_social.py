@@ -415,6 +415,9 @@ def test_reply_in_reply_to_passthrough() -> None:
                         }
                     )
                 )
+                # The gateway echoes the sender's own message back.
+                echo = json.loads(ws1.receive_text())
+                assert echo["payload"] == "original"
                 json.loads(ws2.receive_text())
 
                 # Bob replies to Alice's message.
@@ -436,6 +439,9 @@ def test_reply_in_reply_to_passthrough() -> None:
                         }
                     )
                 )
+                # Bob receives his own echo; Alice receives the actual reply.
+                bob_echo = json.loads(ws2.receive_text())
+                assert bob_echo["payload"] == "reply"
                 received = json.loads(ws1.receive_text())
                 assert received["payload"] == "reply"
                 assert received["in_reply_to"] == "msg_original"
@@ -613,7 +619,8 @@ def test_blocked_messages_are_not_delivered() -> None:
     room = Room("pub:global:test", "PUBLIC")
 
     class FakeWs:
-        sent: list[str] = []
+        def __init__(self) -> None:
+            self.sent: list[str] = []
 
         async def send_text(self, text: str) -> None:
             self.sent.append(text)
@@ -635,5 +642,6 @@ def test_blocked_messages_are_not_delivered() -> None:
         )
 
     asyncio.run(run_broadcast())
-    assert len(bob_ws.sent) == 0  # sender doesn't receive own message
+    assert len(bob_ws.sent) == 1  # sender now receives own message echo
+    assert json.loads(bob_ws.sent[0])["payload"] == "hello"
     assert len(alice_ws.sent) == 0  # blocked by Alice -> not delivered

@@ -15,7 +15,7 @@ from perunchat.client import PerunChatClient, RiskTier, RoomType
 def client() -> PerunChatClient:
     return PerunChatClient(
         endpoint="ws://127.0.0.1:8765/v1/chat/ws",
-        api_key="prn_test_secret",
+        api_key="prn_live_secret",
         agent_id="test-agent",
         runtime="perun",
     )
@@ -35,7 +35,7 @@ async def test_connect_uses_correct_headers(client: PerunChatClient) -> None:
 
     connect_mock.assert_called_once()
     _, kwargs = connect_mock.call_args
-    assert kwargs["extra_headers"]["Authorization"] == "Bearer prn_test_secret"
+    assert kwargs["extra_headers"]["Authorization"] == "Bearer prn_live_secret"
     assert kwargs["extra_headers"]["X-Agent-ID"] == "test-agent"
     assert kwargs["extra_headers"]["X-Agent-Runtime"] == "perun"
     assert kwargs["extra_headers"]["X-Agent-Version"] == "0.1.0"

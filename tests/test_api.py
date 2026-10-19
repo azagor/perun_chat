@@ -46,7 +46,6 @@ def _payload(agent_id: str = "test-agent") -> dict:
         "supported_runtime": "perun",
         "scopes": ["pub:global:*"],
         "label": "test",
-        "live": False,
     }
 
 
@@ -54,13 +53,38 @@ def _dashboard_headers() -> dict:
     return {"X-Perun-Dashboard-Secret": _DASHBOARD_SECRET}
 
 
+def _owner_headers(key: str) -> dict:
+    return {"Authorization": f"Bearer {key}"}
+
+
+def _create(agent_id: str = "test-agent", owner_id: str = "owner-1") -> tuple[str, dict]:
+    """Create a key and return (plaintext_key, key_record)."""
+    payload = _payload(agent_id=agent_id)
+    payload["owner_id"] = owner_id
+    res = client.post("/api/v1/keys", json=payload, headers=_dashboard_headers())
+    assert res.status_code == 200
+    data = res.json()
+    return data["plaintext_key"], data["key"]
+
+
 def test_create_key_success() -> None:
     res = client.post("/api/v1/keys", json=_payload(), headers=_dashboard_headers())
     assert res.status_code == 200
     data = res.json()
     assert data["ok"] is True
-    assert data["plaintext_key"].startswith("prn_test_")
+    assert data["plaintext_key"].startswith("prn_live_")
     assert data["key"]["agent_id"] == "test-agent"
+
+
+def test_create_key_ignores_placeholder_owner_id() -> None:
+    """Public dashboard sends 'dashboard-user'; server must generate a real owner_id."""
+    payload = _payload()
+    payload["owner_id"] = "dashboard-user"
+    res = client.post("/api/v1/keys", json=payload, headers=_dashboard_headers())
+    assert res.status_code == 200
+    data = res.json()
+    assert data["owner_id"] != "dashboard-user"
+    assert len(data["owner_id"]) >= 16
 
 
 def test_create_key_requires_dashboard_secret() -> None:
@@ -82,6 +106,24 @@ def test_create_key_invalid_agent_id_returns_400() -> None:
     assert "agent_id" in res.json()["detail"].lower()
 
 
+def test_create_key_rate_limited() -> None:
+    """Key creation must be globally rate-limited to prevent agent_id exhaustion."""
+    # Override the security pipeline's creation limiter to a tiny burst.
+    from perunchat.gateway import gateway
+
+    gateway.security.creation_limiter = SecurityPipeline().creation_limiter
+    gateway.security.creation_limiter.capacity = 2
+    gateway.security.creation_limiter.window_seconds = 60
+    gateway.security.creation_limiter._failures.clear()
+    # First two requests should succeed.
+    assert client.post("/api/v1/keys", json=_payload(agent_id="rate-a"), headers=_dashboard_headers()).status_code == 200
+    assert client.post("/api/v1/keys", json=_payload(agent_id="rate-b"), headers=_dashboard_headers()).status_code == 200
+    # Third request in the same window must be rate limited.
+    res = client.post("/api/v1/keys", json=_payload(agent_id="rate-c"), headers=_dashboard_headers())
+    assert res.status_code == 429
+    assert res.json()["detail"] == "key_creation_rate_limited"
+
+
 def test_check_agent_id_availability() -> None:
     assert (
         client.get("/api/v1/keys/availability/free-agent", headers=_dashboard_headers()).json()["available"] is True
@@ -92,17 +134,51 @@ def test_check_agent_id_availability() -> None:
     )
 
 
-def test_revoke_key_returns_404_for_unknown() -> None:
-    res = client.delete("/api/v1/keys/key_doesnotexist", headers=_dashboard_headers())
-    assert res.status_code == 404
-
-
-def test_list_keys_includes_created() -> None:
-    client.post("/api/v1/keys", json=_payload(agent_id="listed-agent"), headers=_dashboard_headers())
+def test_list_keys_requires_owner_authentication() -> None:
     res = client.get("/api/v1/keys", headers=_dashboard_headers())
+    assert res.status_code == 401
+
+
+def test_list_keys_includes_created_for_owner() -> None:
+    key, _ = _create(agent_id="listed-agent")
+    res = client.get("/api/v1/keys", headers=_owner_headers(key))
     assert res.status_code == 200
     agent_ids = {k["agent_id"] for k in res.json()["keys"]}
     assert "listed-agent" in agent_ids
+
+
+def test_list_keys_is_scoped_to_owner() -> None:
+    key_a, _ = _create(agent_id="owner-a-agent", owner_id="owner-a")
+    _create(agent_id="owner-b-agent", owner_id="owner-b")
+    res = client.get("/api/v1/keys", headers=_owner_headers(key_a))
+    assert res.status_code == 200
+    agent_ids = {k["agent_id"] for k in res.json()["keys"]}
+    assert "owner-a-agent" in agent_ids
+    assert "owner-b-agent" not in agent_ids
+
+
+def test_revoke_key_requires_owner_authentication() -> None:
+    res = client.delete("/api/v1/keys/key_doesnotexist", headers=_dashboard_headers())
+    assert res.status_code == 401
+
+
+def test_revoke_key_returns_404_for_unknown() -> None:
+    key, _ = _create()
+    res = client.delete("/api/v1/keys/key_doesnotexist", headers=_owner_headers(key))
+    assert res.status_code == 404
+
+
+def test_revoke_key_is_scoped_to_owner() -> None:
+    key_a, record_a = _create(agent_id="revoke-a", owner_id="owner-a")
+    _, record_b = _create(agent_id="revoke-b", owner_id="owner-b")
+    # owner-a cannot revoke owner-b's key
+    res = client.delete(f"/api/v1/keys/{record_b['id']}", headers=_owner_headers(key_a))
+    assert res.status_code == 404
+    # owner-b can revoke their own key
+    res = client.delete(f"/api/v1/keys/{record_b['id']}", headers=_owner_headers(_create(agent_id="revoke-b2", owner_id="owner-b")[0]))
+    # Note: created a second key for owner-b to authenticate; the original key is still active.
+    # Actually the first record_b key is still active, so the second key can revoke it.
+    assert res.status_code == 200
 
 
 def test_me_returns_authenticated_agent() -> None:

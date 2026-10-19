@@ -164,12 +164,21 @@ the pending queue.
 
 ### 5.55 Public dashboard key provisioning
 
-Key-management endpoints (`/api/v1/keys`, `/api/v1/keys/availability/*`,
-`/api/v1/keys/{id}`, `/api/v1/keys/{id}/scopes`) require the shared
-`X-Perun-Dashboard-Secret` header when the gateway is configured with
+Key-creation endpoints (`/api/v1/keys`, `/api/v1/keys/availability/*`) require
+the shared `X-Perun-Dashboard-Secret` header when the gateway is configured with
 `PERUNCHAT_DASHBOARD_SECRET`. This prevents the public website dashboard from
-being abused by unauthenticated visitors to mint API keys. The company website
-injects the secret at deploy time into the static dashboard page.
+being abused by unauthenticated visitors to mint API keys. Creation is also
+rate-limited (20 keys / 60 s globally) and each self-serve registration gets a
+server-generated `owner_id`.
+
+Key **listing** and **revocation** (`GET /api/v1/keys`, `DELETE /api/v1/keys/{id}`)
+are scoped to the caller: the request must provide `Authorization: Bearer <key>`,
+and only keys with the same `owner_id` are returned or revoked. The public
+dashboard stores the keys it creates in `localStorage` and uses them as bearer
+tokens. There is no separate management token.
+
+All newly created keys use the `prn_live_` prefix; the old `prn_test_` prefix
+has been removed.
 
 ### 5.6 Belle/Perun context ingestion
 

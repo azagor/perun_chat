@@ -17,7 +17,7 @@ def test_connect_zeroclaw_joins_room() -> None:
         return_value=mock_ws,
     )
     with mock_create as create_mock:
-        client = connect_zeroclaw("prn_test_key", "zc-01", "grp:test:room")
+        client = connect_zeroclaw("prn_live_key", "zc-01", "grp:test:room")
 
     create_mock.assert_called_once()
     sent = json.loads(mock_ws.send.call_args[0][0])
@@ -29,7 +29,7 @@ def test_connect_zeroclaw_joins_room() -> None:
 
 def test_send_text() -> None:
     mock_ws = MagicMock()
-    client = ZeroClawClient("prn_test_key", "zc-01")
+    client = ZeroClawClient("prn_live_key", "zc-01")
     client.ws = mock_ws
 
     client.send_text("grp:test:room", "GROUP", "hello from edge")
@@ -42,7 +42,7 @@ def test_send_text() -> None:
 def test_poll_invalid_json() -> None:
     mock_ws = MagicMock()
     mock_ws.recv.return_value = "not-json"
-    client = ZeroClawClient("prn_test_key", "zc-01")
+    client = ZeroClawClient("prn_live_key", "zc-01")
     client.ws = mock_ws
 
     frame = client.poll()

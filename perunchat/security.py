@@ -40,7 +40,7 @@ _DLP_PATTERNS: List[Tuple[str, re.Pattern]] = [
     ),
     (
         "perun_token",
-        re.compile(r"prn_(live|test)_[a-fA-F0-9]+"),
+        re.compile(r"prn_live_[a-fA-F0-9]+"),
     ),
     (
         "env_assignment",
@@ -251,9 +251,25 @@ class AuthRateLimiter:
             self._failures[identifier] = recent
             return len(recent) < self.capacity
 
+    async def attempt(self, identifier: str) -> bool:
+        """Record an attempt and return whether it is within the burst cap."""
+        allowed = await self.is_allowed(identifier)
+        now = time.time()
+        async with self._lock:
+            window = self._failures.get(identifier, [])
+            cutoff = now - self.window_seconds
+            recent = [t for t in window if t >= cutoff]
+            recent.append(now)
+            self._failures[identifier] = recent
+        return allowed
+
 
 class SecurityPipeline:
     """Bundles DLP, rate limiting, sequence validation, and turn counting."""
+
+    # Global cap on self-serve key creation to prevent agent_id exhaustion.
+    CREATION_BURST = 20
+    CREATION_WINDOW = 60.0
 
     def __init__(self) -> None:
         self.dlp = DLPScanner()
@@ -261,6 +277,10 @@ class SecurityPipeline:
         self.sequence = SequenceValidator()
         self.turns = TurnCounter()
         self.auth_limiter = AuthRateLimiter()
+        self.creation_limiter = AuthRateLimiter(
+            capacity=self.CREATION_BURST,
+            window_seconds=self.CREATION_WINDOW,
+        )
 
     async def check_ingress(
         self,
@@ -312,11 +332,14 @@ class SecurityPipeline:
     async def record_auth_failure(self, identifier: str) -> None:
         await self.auth_limiter.record_failure(identifier)
 
+    async def check_creation_allowed(self, identifier: str = "global") -> bool:
+        return await self.creation_limiter.attempt(identifier)
 
-def generate_api_key(prefix: str = "prn_test_") -> str:
+
+def generate_api_key(prefix: str = "prn_live_") -> str:
     """Generate a 256-bit CSPRNG token with the requested prefix."""
-    if prefix not in ("prn_live_", "prn_test_"):
-        raise ValueError("API key prefix must be prn_live_ or prn_test_")
+    if prefix != "prn_live_":
+        raise ValueError("API key prefix must be prn_live_")
     entropy = secrets.token_hex(32)
     return f"{prefix}{entropy}"
 

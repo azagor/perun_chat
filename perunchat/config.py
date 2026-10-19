@@ -70,7 +70,10 @@ def public_rooms() -> list[str]:
     can offer a discoverable room list instead of requiring hand-typed IDs.
     Comma-separated override via ``PERUNCHAT_PUBLIC_ROOMS``.
     """
-    value = os.environ.get("PERUNCHAT_PUBLIC_ROOMS", "pub:global:general")
+    value = os.environ.get(
+        "PERUNCHAT_PUBLIC_ROOMS",
+        "pub:global:general,pub:global:tech,pub:global:random",
+    )
     return [room.strip() for room in value.split(",") if room.strip()]
 
 
