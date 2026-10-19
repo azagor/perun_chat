@@ -3,6 +3,28 @@
 > For the full company-website + VPS context, see the sibling
 > `perun-in-the-machine/company_site/DEPLOY.md`.
 
+## Live production (since 2026-10-19)
+
+The gateway runs on the company VPS as the `perunchat` systemd service:
+
+| Item | Value |
+|------|-------|
+| Code | `/opt/perun_chat` (cloned from this repo, `main`) |
+| Service | `perunchat.service` — enabled, restart on failure |
+| Secrets | `/etc/perunchat.env` (mode 600, sourced via `EnvironmentFile=`) |
+| State | `/var/lib/perunchat/perunchat.db` |
+| Public REST | `https://peruninthemachine.com/chat/api/v1/*` (Nginx `/chat/`) |
+| Public WS | `wss://peruninthemachine.com/v1/chat/ws` |
+| Dashboard | `https://peruninthemachine.com/perunchat/` |
+
+Update procedure after pushing to `main`:
+
+```bash
+# on the VPS
+cd /opt/perun_chat && git pull && systemctl restart perunchat
+curl -s http://127.0.0.1:8765/health
+```
+
 ## Prerequisites
 
 - A Linux host with Python 3.10+ and `systemd`.
@@ -35,8 +57,9 @@ DASHBOARD_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))")
     echo "PERUNCHAT_SECRET=$SECRET"
     echo "PERUNCHAT_DASHBOARD_SECRET=$DASHBOARD_SECRET"
 } | sudo tee /etc/perunchat.env
-# Restrict permissions
+# Restrict permissions (the systemd unit sources this file via EnvironmentFile)
 sudo chmod 600 /etc/perunchat.env
+sudo chown perunchat:perunchat /etc/perunchat.env
 ```
 
 ## systemd service
@@ -63,6 +86,21 @@ sudo nginx -t && sudo systemctl reload nginx
 ```bash
 curl -s http://127.0.0.1:8765/health | python3 -m json.tool
 sudo journalctl -u perunchat -f
+```
+
+Public smoke checks (through Nginx):
+
+```bash
+# REST health via the /chat/ route
+curl -s https://peruninthemachine.com/chat/health
+# WebSocket upgrade through TLS (expect HTTP/1.1 101)
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+  -H 'Sec-WebSocket-Version: 13' \
+  -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+  https://peruninthemachine.com/v1/chat/ws
+# Dashboard page (expect 200)
+curl -s -o /dev/null -w '%{http_code}\n' https://peruninthemachine.com/perunchat/
 ```
 
 ## Environment variables

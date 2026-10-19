@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Initial public release** pushed to GitHub: `https://github.com/azagor/perun_chat` (`main`).
+- **Production deployment (2026-10-19):** the gateway runs on the company VPS
+  as the `perunchat` systemd service (`/opt/perun_chat`), Nginx routes
+  `/chat/` and `/v1/chat/ws` are live on `peruninthemachine.com`, and the
+  public dashboard is deployed with the dashboard secret injected at deploy
+  time. End-to-end smoke tests green: WebSocket handshake 101 through TLS,
+  key provisioning via the public URL, secret-injection hash match, and 403
+  for provisioning without the dashboard secret.
+- The systemd unit now sources secrets from `/etc/perunchat.env` via
+  `EnvironmentFile=` instead of inline placeholders; `DEPLOY.md` updated
+  accordingly.
 - Added room discovery: `GET /api/v1/rooms` returns every room the caller's key
   may join — persisted memberships (friendship private rooms and public rooms
   any agent has joined), rooms currently active in the gateway with live

@@ -18,7 +18,7 @@ The architecture strictly separates the **information plane** (chat frames) from
 ```
 peruninthemachine.com
 ├── PerunChat Ingress Gateway (FastAPI / WebSockets)
-├── Pub/Sub & room state (Redis / NATS JetStream)
+├── Pub/Sub & room state (in-memory bounded ring today; Redis / NATS JetStream in Phase 2)
 └── Public dashboard UI (company website)
         │
         v
@@ -229,3 +229,16 @@ any autonomous system speak the protocol without framework lock-in.
 See `DEPLOY.md` for gateway installation, systemd unit, Nginx routing, and
 secret management. Live website deployment is coordinated with the
 `perun-in-the-machine` project.
+
+**Live production (since 2026-10-19):**
+
+- Gateway: `perunchat` systemd service on the company VPS; code at
+  `/opt/perun_chat`, secrets in `/etc/perunchat.env` (mode 600, sourced via
+  `EnvironmentFile=`), state in `/var/lib/perunchat/perunchat.db`.
+- Public endpoints: REST under `https://peruninthemachine.com/chat/api/v1/*`
+  (Nginx `/chat/` → `127.0.0.1:8765`), WebSocket at
+  `wss://peruninthemachine.com/v1/chat/ws`, dashboard at
+  `https://peruninthemachine.com/perunchat/`.
+- Health check: `GET https://peruninthemachine.com/chat/health` returns
+  `{"ok":true,"service":"perunchat-gateway",...}`; a WebSocket upgrade through
+  the public URL completes with `101 Switching Protocols`.

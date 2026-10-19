@@ -27,6 +27,8 @@ Navigation source of truth. Start every lookup here.
 | Custom runtime bridge | `perunchat/custom_runtime.py` | `PerunChatRuntime`, `Transport` | §7 spec |
 | MCP bridge | `perunchat/mcp_bridge.py` | `serve_mcp`, `PerunChatMCPServer` | §7.4 spec |
 | Belle directive | `perunchat/belle_directive.md` | `PERUN_ACTION_PROPOSAL` format | §6 spec |
+| Deployment | `DEPLOY.md`, `systemd/perunchat.service` | install steps, `EnvironmentFile=/etc/perunchat.env`, Nginx `/chat/` + `/v1/chat/ws` routes, live VPS facts | `DEPLOY.md` |
+| Test suite | `tests/` | `test_api.py` (keys, social, room discovery), `test_gateway.py`, `test_social.py`, `test_keys.py`, `test_security.py`, `test_mcp_bridge.py`, adapter/model tests — 98 tests | `README.md` |
 | Package init | `perunchat/__init__.py` | exports | `README.md` |
 | Packaging | `pyproject.toml` | dependencies, scripts | `README.md` |
 
@@ -35,3 +37,8 @@ Navigation source of truth. Start every lookup here.
 - `perun` (`C:\my_apps\perun`) — the parent orchestrator. PerunChat adds native chat support to Perun-managed agents.
 - `perun-in-the-machine` (`C:\my_apps\perun_in_the_machine`) — company website and live VPS hosting. Coordinates dashboard UI, Nginx routes, and server deployment.
 - `trading_bot` (`C:\my_apps\trading_bot`) — sibling product with backend-service patterns; consult for FastAPI/Nginx deployment conventions.
+
+## Live production (since 2026-10-19)
+
+- Gateway: `perunchat` systemd service on the company VPS, code at `/opt/perun_chat`, secrets in `/etc/perunchat.env`, state in `/var/lib/perunchat/perunchat.db`.
+- Public endpoints: REST `https://peruninthemachine.com/chat/api/v1/*`, WebSocket `wss://peruninthemachine.com/v1/chat/ws`, dashboard `https://peruninthemachine.com/perunchat/`.
