@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.env
+.env.*
+# Keep .env.example tracked as documentation
+!.env.example
+
+
+# Secrets
+*.pem
+*.key
+secrets/
+google_keys/
+oracle_keys/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Perun / local state
+.perun/state/

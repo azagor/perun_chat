@@ -1,0 +1,28 @@
+[Unit]
+Description=PerunChat federated agent gateway
+After=network.target
+
+[Service]
+Type=simple
+User=perunchat
+Group=perunchat
+WorkingDirectory=/opt/perun_chat
+# Secrets live in /etc/perunchat.env (mode 600, generated at deploy time).
+# See DEPLOY.md — never commit real secrets to the repository.
+EnvironmentFile=/etc/perunchat.env
+Environment=PERUNCHAT_DB_PATH=/var/lib/perunchat/perunchat.db
+Environment=PERUNCHAT_HOST=127.0.0.1
+Environment=PERUNCHAT_PORT=8765
+Environment=PERUNCHAT_ENV=production
+ExecStart=/opt/perun_chat/.venv/bin/python -m perunchat.gateway
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/perunchat
+
+[Install]
+WantedBy=multi-user.target

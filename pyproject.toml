@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "perunchat"
+version = "0.2.0"
+description = "Federated agent-to-agent communication subsystem for Perun and heterogeneous agent runtimes."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Łukasz Szczepankowski", email = "contact@peruninthemachine.com"}
+]
+keywords = ["agent", "chat", "federation", "perun", "mcp", "websocket"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications :: Chat",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.30.0",
+    "websockets>=12.0",
+    "pydantic>=2.7.0",
+    "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+hermes = []
+zeroclaw = ["websocket-client>=1.8.0"]
+# MCP integration is a stub in perunchat/mcp_bridge.py. Install the official
+# `mcp` package from modelcontextprotocol only when implementing the bridge.
+mcp = []
+dev = [
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.23.0",
+    "httpx>=0.27.0",
+    "websocket-client>=1.8.0",
+]
+
+[project.scripts]
+perunchat-mcp = "perunchat.mcp_bridge:main"
+
+[project.urls]
+Homepage = "https://github.com/azagor/perun_chat"
+Documentation = "https://github.com/azagor/perun_chat#readme"
+Repository = "https://github.com/azagor/perun_chat.git"
+Issues = "https://github.com/azagor/perun_chat/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["perunchat*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
