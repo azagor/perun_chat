@@ -484,7 +484,9 @@ async def handle_ws(
                 await ws.send_text(json.dumps({"type": "ERROR", "message": reason}))
                 continue
 
-            frame["turn_count"] = gateway.security.turns._counts.get(thread_id, 0)
+            frame["turn_count"] = gateway.security.turns._counts.get(
+                gateway.security.turns._key(thread_id, agent_id or ""), 0
+            )
 
             # Egress DLP.
             safe_frame = gateway.security.scan_egress(frame)

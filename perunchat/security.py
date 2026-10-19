@@ -195,37 +195,55 @@ class TurnCounter:
     """
     Tracks autonomous turns per thread. Circuit breaks at 8 consecutive turns
     without operator input, setting state LOCKED_PENDING_OPERATOR.
+
+    The counter exists to stop two *autonomous* agents ping-ponging forever. It
+    must not silence a room in which a human is present, so:
+    - it is keyed per ``thread_id`` **and** agent, so one busy agent cannot lock
+      the thread for everyone else; and
+    - any non-autonomous runtime (``operator``, ``custom``, ``dashboard``, ...)
+      resets the agent's own counter, so a human/dashboard message always
+      clears the lock.
     """
 
     LIMIT = 8
+    # Runtimes that represent a human/operator-driven client rather than an
+    # autonomous loop. Anything not listed here counts as autonomous.
+    OPERATOR_RUNTIMES = {"operator", "custom", "dashboard", "human"}
 
     def __init__(self) -> None:
         self._counts: Dict[str, int] = {}
         self._locked: Set[str] = set()
 
-    def is_locked(self, thread_id: str) -> bool:
-        return thread_id in self._locked
+    @staticmethod
+    def _key(thread_id: str, agent_id: str) -> str:
+        return f"{thread_id}\u0000{agent_id}"
 
-    def increment(self, thread_id: str, sender_runtime: Optional[str] = None) -> Tuple[int, bool]:
+    def is_locked(self, thread_id: str, agent_id: str = "") -> bool:
+        return self._key(thread_id, agent_id) in self._locked
+
+    def increment(self, thread_id: str, sender_runtime: Optional[str] = None,
+                  agent_id: str = "") -> Tuple[int, bool]:
         """
         Increment turn counter for a thread. Returns (new_count, is_locked).
         Operator runtime resets the counter; autonomous runtimes increment it.
         """
-        if sender_runtime == "operator":
-            self._counts[thread_id] = 0
-            self._locked.discard(thread_id)
+        key = self._key(thread_id, agent_id)
+        if sender_runtime in self.OPERATOR_RUNTIMES:
+            self._counts[key] = 0
+            self._locked.discard(key)
             return 0, False
 
-        self._counts[thread_id] = self._counts.get(thread_id, 0) + 1
-        count = self._counts[thread_id]
+        self._counts[key] = self._counts.get(key, 0) + 1
+        count = self._counts[key]
         if count >= self.LIMIT:
-            self._locked.add(thread_id)
+            self._locked.add(key)
             return count, True
         return count, False
 
-    def reset(self, thread_id: str) -> None:
-        self._counts.pop(thread_id, None)
-        self._locked.discard(thread_id)
+    def reset(self, thread_id: str, agent_id: str = "") -> None:
+        key = self._key(thread_id, agent_id)
+        self._counts.pop(key, None)
+        self._locked.discard(key)
 
 
 class AuthRateLimiter:
@@ -304,7 +322,7 @@ class SecurityPipeline:
         if not ok:
             return False, reason
 
-        count, locked = self.turns.increment(thread_id, runtime)
+        count, locked = self.turns.increment(thread_id, runtime, agent_id)
         if locked:
             return False, "thread_locked_pending_operator"
 

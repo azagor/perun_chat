@@ -107,6 +107,31 @@ def test_turn_counter_resets_on_operator_input() -> None:
     assert not locked
 
 
+def test_turn_counter_resets_on_custom_runtime() -> None:
+    """A dashboard/human client sends runtime=custom and must clear the lock."""
+    turns = TurnCounter()
+    for _ in range(8):
+        turns.increment("thrd-3", agent_id="agent-a")
+    assert turns.is_locked("thrd-3", "agent-a")
+    count, locked = turns.increment("thrd-3", sender_runtime="custom", agent_id="agent-a")
+    assert count == 0
+    assert not locked
+    assert not turns.is_locked("thrd-3", "agent-a")
+
+
+def test_turn_counter_is_per_agent() -> None:
+    """One busy agent must not lock the thread for another participant."""
+    turns = TurnCounter()
+    for _ in range(8):
+        turns.increment("thrd-4", agent_id="agent-a")
+    assert turns.is_locked("thrd-4", "agent-a")
+    # A different agent on the same thread is unaffected.
+    count, locked = turns.increment("thrd-4", agent_id="agent-b")
+    assert count == 1
+    assert not locked
+    assert not turns.is_locked("thrd-4", "agent-b")
+
+
 def test_security_pipeline_scan_egress() -> None:
     pipeline = SecurityPipeline()
     frame = {"payload": "secret prn_live_deadbeef"}
