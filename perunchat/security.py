@@ -165,11 +165,15 @@ class SequenceValidator:
     def validate(
         self,
         agent_id: str,
+        runtime: str,
         sequence_number: int,
         timestamp_ms: int,
         nonce: Optional[str] = None,
     ) -> Tuple[bool, Optional[str]]:
-        key = agent_id
+        # Different clients (e.g. the autonomous bridge vs. the browser dashboard)
+        # may share an agent_id/API key but use distinct runtimes. Keep their
+        # sequence streams separate so one client cannot invalidate the other.
+        key = f"{agent_id}:{runtime}"
         last = self._last_seq.get(key, -1)
         if sequence_number <= last:
             return False, "non_monotonic_sequence"
@@ -296,7 +300,7 @@ class SecurityPipeline:
         if not allowed:
             return False, "rate_limited"
 
-        ok, reason = self.sequence.validate(agent_id, sequence_number, timestamp_ms, nonce)
+        ok, reason = self.sequence.validate(agent_id, runtime, sequence_number, timestamp_ms, nonce)
         if not ok:
             return False, reason
 

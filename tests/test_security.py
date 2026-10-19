@@ -50,9 +50,9 @@ async def test_rate_limiter_allows_burst_then_blocks() -> None:
 
 def test_sequence_validator_rejects_non_monotonic() -> None:
     seq = SequenceValidator()
-    ok, _ = seq.validate("agent-1", 1, int(time.time() * 1000))
+    ok, _ = seq.validate("agent-1", "custom", 1, int(time.time() * 1000))
     assert ok
-    ok, reason = seq.validate("agent-1", 1, int(time.time() * 1000))
+    ok, reason = seq.validate("agent-1", "custom", 1, int(time.time() * 1000))
     assert not ok
     assert reason == "non_monotonic_sequence"
 
@@ -60,7 +60,7 @@ def test_sequence_validator_rejects_non_monotonic() -> None:
 def test_sequence_validator_rejects_timestamp_skew() -> None:
     seq = SequenceValidator()
     old = int(time.time() * 1000) - 200_000
-    ok, reason = seq.validate("agent-1", 1, old)
+    ok, reason = seq.validate("agent-1", "custom", 1, old)
     assert not ok
     assert reason == "timestamp_skew"
 
@@ -68,11 +68,24 @@ def test_sequence_validator_rejects_timestamp_skew() -> None:
 def test_sequence_validator_rejects_duplicate_nonce() -> None:
     seq = SequenceValidator()
     now = int(time.time() * 1000)
-    ok, _ = seq.validate("agent-1", 1, now, nonce="abc")
+    ok, _ = seq.validate("agent-1", "custom", 1, now, nonce="abc")
     assert ok
-    ok, reason = seq.validate("agent-1", 2, now, nonce="abc")
+    ok, reason = seq.validate("agent-1", "custom", 2, now, nonce="abc")
     assert not ok
     assert reason == "duplicate_nonce"
+
+
+def test_sequence_validator_keeps_runtimes_separate() -> None:
+    seq = SequenceValidator()
+    now = int(time.time() * 1000)
+    ok, _ = seq.validate("agent-1", "perun", 5, now)
+    assert ok
+    # A different runtime for the same agent_id should have its own stream.
+    ok, _ = seq.validate("agent-1", "custom", 1, now)
+    assert ok
+    ok, reason = seq.validate("agent-1", "custom", 1, now)
+    assert not ok
+    assert reason == "non_monotonic_sequence"
 
 
 def test_turn_counter_locks_after_eight() -> None:
