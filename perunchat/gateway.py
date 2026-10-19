@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from collections import deque
 from contextlib import asynccontextmanager
@@ -19,6 +20,8 @@ from typing import Any, Dict, Optional, Set
 
 from fastapi import Depends, FastAPI, Header, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
+
+logger = logging.getLogger("perunchat.gateway")
 
 from . import config, db as db_module
 from .api import (
@@ -202,6 +205,19 @@ async def _proposal_cleanup_task() -> None:
             pass
 
 
+async def _turn_counter_cleanup_task() -> None:
+    """Background task that prunes stale TurnCounter entries every 5 minutes."""
+    while True:
+        await asyncio.sleep(300)
+        try:
+            pruned = gateway.security.turns.prune()
+            if pruned:
+                logger.info("PerunChat gateway pruned %d stale turn-counter entries", pruned)
+        except Exception:
+            # Cleanup failures must not crash the gateway.
+            pass
+
+
 def _load_room_members() -> None:
     """Load persisted room memberships into the in-memory resolver on startup."""
     try:
@@ -222,10 +238,16 @@ async def lifespan(app: FastAPI):
     app.state.gateway = gateway
     _load_room_members()
     cleanup = asyncio.create_task(_proposal_cleanup_task())
+    turn_cleanup = asyncio.create_task(_turn_counter_cleanup_task())
     yield
     cleanup.cancel()
+    turn_cleanup.cancel()
     try:
         await cleanup
+    except asyncio.CancelledError:
+        pass
+    try:
+        await turn_cleanup
     except asyncio.CancelledError:
         pass
 

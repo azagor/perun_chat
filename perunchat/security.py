@@ -203,16 +203,23 @@ class TurnCounter:
     - any non-autonomous runtime (``operator``, ``custom``, ``dashboard``, ...)
       resets the agent's own counter, so a human/dashboard message always
       clears the lock.
+
+    To prevent unbounded memory growth on long-lived gateways, entries older
+    than ``PRUNE_AGE_SECONDS`` are removed by ``prune()`` (called from a
+    background task) and the dict is capped at ``MAX_KEYS``.
     """
 
     LIMIT = 8
     # Runtimes that represent a human/operator-driven client rather than an
     # autonomous loop. Anything not listed here counts as autonomous.
     OPERATOR_RUNTIMES = {"operator", "custom", "dashboard", "human"}
+    PRUNE_AGE_SECONDS = 3600.0  # 1 hour
+    MAX_KEYS = 10000
 
     def __init__(self) -> None:
         self._counts: Dict[str, int] = {}
         self._locked: Set[str] = set()
+        self._last_seen: Dict[str, float] = {}
 
     @staticmethod
     def _key(thread_id: str, agent_id: str) -> str:
@@ -228,6 +235,8 @@ class TurnCounter:
         Operator runtime resets the counter; autonomous runtimes increment it.
         """
         key = self._key(thread_id, agent_id)
+        now = time.time()
+        self._last_seen[key] = now
         if sender_runtime in self.OPERATOR_RUNTIMES:
             self._counts[key] = 0
             self._locked.discard(key)
@@ -244,6 +253,23 @@ class TurnCounter:
         key = self._key(thread_id, agent_id)
         self._counts.pop(key, None)
         self._locked.discard(key)
+        self._last_seen.pop(key, None)
+
+    def prune(self) -> int:
+        """Remove stale entries. Returns number of removed keys."""
+        cutoff = time.time() - self.PRUNE_AGE_SECONDS
+        stale = [k for k, t in self._last_seen.items() if t < cutoff]
+        # If still over the cap, remove oldest entries regardless of age.
+        if len(self._last_seen) - len(stale) > self.MAX_KEYS:
+            survivors = {k: t for k, t in self._last_seen.items() if t >= cutoff}
+            sorted_keys = sorted(survivors, key=survivors.get)
+            extra = len(survivors) - self.MAX_KEYS
+            stale.extend(sorted_keys[:extra])
+        for key in stale:
+            self._counts.pop(key, None)
+            self._locked.discard(key)
+            self._last_seen.pop(key, None)
+        return len(stale)
 
 
 class AuthRateLimiter:

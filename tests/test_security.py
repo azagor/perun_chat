@@ -132,6 +132,20 @@ def test_turn_counter_is_per_agent() -> None:
     assert not turns.is_locked("thrd-4", "agent-b")
 
 
+def test_turn_counter_prunes_stale_entries() -> None:
+    """Old entries are evicted so memory does not grow without bound."""
+    turns = TurnCounter()
+    turns.PRUNE_AGE_SECONDS = 0.05
+    turns.increment("thrd-5", agent_id="agent-a")
+    assert len(turns._last_seen) == 1
+    import time
+    time.sleep(0.06)
+    removed = turns.prune()
+    assert removed == 1
+    assert len(turns._last_seen) == 0
+    assert not turns.is_locked("thrd-5", "agent-a")
+
+
 def test_security_pipeline_scan_egress() -> None:
     pipeline = SecurityPipeline()
     frame = {"payload": "secret prn_live_deadbeef"}
