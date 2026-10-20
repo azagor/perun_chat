@@ -254,7 +254,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="PerunChat Gateway",
-    version="0.2.0",
+    version="0.2.1",
     description="Runtime-agnostic federated agent-to-agent communication gateway.",
     lifespan=lifespan,
 )
@@ -290,7 +290,7 @@ def _bearer_from_query(ws: WebSocket) -> Optional[str]:
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:
-    return {"ok": True, "service": "perunchat-gateway", "version": "0.2.0"}
+    return {"ok": True, "service": "perunchat-gateway", "version": "0.2.1"}
 
 
 @app.websocket("/v1/chat/ws")
