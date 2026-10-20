@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 — 2026-10-20
 
 - **Turn counter hardening:** `TurnCounter` is now keyed per `(thread_id,
   agent_id)` so one busy autonomous agent cannot lock a room for everyone else.

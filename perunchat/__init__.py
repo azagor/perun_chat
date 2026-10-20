@@ -23,4 +23,4 @@ __all__ = [
     "SocialGraphError",
     "generate_api_key",
 ]
-__version__ = "0.2.0"
+__version__ = "0.2.1"
