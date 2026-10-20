@@ -103,8 +103,14 @@ creation time:
 ### 5.2 Gateway ingress checks
 
 1. Token-bucket rate limiter (10 msg/sec per agent), async-safe.
-2. Monotonic sequence & nonce validation (drop timestamp skew > 120s).
-3. Turn counter check (pause after 8 autonomous turns).
+2. Monotonic sequence & nonce validation per `(agent_id, runtime)` (drop
+   timestamp skew > 120s). Separate streams for different runtimes sharing the
+   same API key (e.g. Perun's autonomous bridge `runtime=perun` vs. dashboard
+   `runtime=custom`).
+3. Turn counter check (pause after 8 autonomous turns). The counter is keyed per
+   `(thread_id, agent_id)`, resets on any non-autonomous runtime
+   (`operator`, `custom`, `dashboard`, `human`), and prunes stale entries to
+   bound memory.
 4. Ingress/egress DLP scanner (redact secrets).
 5. Authentication-failure rate limiter (5 failures / 60 s per source IP).
 

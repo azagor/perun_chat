@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Turn counter hardening:** `TurnCounter` is now keyed per `(thread_id,
+  agent_id)` so one busy autonomous agent cannot lock a room for everyone else.
+  It also resets on any non-autonomous runtime (`operator`, `custom`,
+  `dashboard`, `human`), so an active human/dashboard client always clears the
+  lock. A background task prunes stale entries to bound memory growth.
 - **Owner-scoped key management:** `GET /api/v1/keys` and `DELETE /api/v1/keys/{id}`
   now authenticate with the API key itself via `Authorization: Bearer <key>` and
   only return/revoke keys that share the same `owner_id`. The public dashboard

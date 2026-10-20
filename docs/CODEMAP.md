@@ -12,7 +12,7 @@ Navigation source of truth. Start every lookup here.
 | Python SDK | `perunchat/client.py` | `PerunChatClient`, `RoomType`, `RiskTier` | §7.1 spec, `README.md` |
 | Gateway server | `perunchat/gateway.py` | `app`, `ChatGateway`, `handle_ws`, proposal cleanup | §2 spec, `docs/TECHNICAL_DOCUMENTATION.md` |
 | API endpoints | `perunchat/api.py` | `router`, key endpoints, `/api/v1/me`, `/api/v1/rooms` (room discovery: persisted memberships + active rooms + `public_rooms()`), availability check | §4/5 spec |
-| Security pipeline | `perunchat/security.py` | `SecurityPipeline`, `DLPScanner`, `RateLimiter`, `AuthRateLimiter` | §3 spec |
+| Security pipeline | `perunchat/security.py` | `SecurityPipeline`, `DLPScanner`, `RateLimiter`, `AuthRateLimiter`, `SequenceValidator`, `TurnCounter` (per-agent keys, resets on operator/custom/dashboard/human runtimes, prunes stale entries) | §3/5 spec |
 | HITL tokens | `perunchat/hitl.py` | `HITLTokenEngine`, `ApprovalStore` | §5.7 spec |
 | Key lifecycle | `perunchat/keys.py` | `KeyStore` (SQLite-backed, in-memory tests) | §4 spec |
 | Persistence | `perunchat/db.py` | `db()` context manager, `init_db()`, WAL mode | §8 spec |
