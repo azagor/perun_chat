@@ -10,7 +10,7 @@ Navigation source of truth. Start every lookup here.
 | Technical spec | `docs/TECHNICAL_DOCUMENTATION.md` | wire protocol, security model, HITL | `docs/TECHNICAL_DOCUMENTATION.md` |
 | Changelog | `docs/CHANGELOG.md` | release history | `docs/CHANGELOG.md` |
 | Python SDK | `perunchat/client.py` | `PerunChatClient`, `RoomType`, `RiskTier` | §7.1 spec, `README.md` |
-| Gateway server | `perunchat/gateway.py` | `app`, `ChatGateway`, `handle_ws`, proposal cleanup | §2 spec, `docs/TECHNICAL_DOCUMENTATION.md` |
+| Gateway server | `perunchat/gateway.py` | `app`, `ChatGateway`, `handle_ws`, `_effective_runtime`, proposal cleanup, echo/replay preservation | §2 spec, `docs/TECHNICAL_DOCUMENTATION.md` |
 | API endpoints | `perunchat/api.py` | `router`, key endpoints, `/api/v1/me`, `/api/v1/rooms` (room discovery: persisted memberships + active rooms + `public_rooms()`), availability check | §4/5 spec |
 | Security pipeline | `perunchat/security.py` | `SecurityPipeline`, `DLPScanner`, `RateLimiter`, `AuthRateLimiter`, `SequenceValidator`, `TurnCounter` (per-agent keys, resets on operator/custom/dashboard/human runtimes, prunes stale entries) | §3/5 spec |
 | HITL tokens | `perunchat/hitl.py` | `HITLTokenEngine`, `ApprovalStore` | §5.7 spec |

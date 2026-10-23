@@ -10,6 +10,7 @@ sends the correct headers and frame schema can connect.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import time
@@ -63,13 +64,16 @@ class Room:
     async def leave(self, ws: WebSocket) -> None:
         self.connections.pop(ws, None)
 
+
     async def broadcast(self, sender: WebSocket, frame: Dict[str, Any]) -> None:
         sender_agent_id = self.connections.get(sender)
         message = json.dumps(frame, ensure_ascii=False)
         # Only store real chat frames for late-joiners; ephemeral control frames
-        # such as PRESENCE_UPDATE should not be replayed.
+        # such as PRESENCE_UPDATE should not be replayed. Store a deep copy so
+        # any later mutation of the broadcast frame cannot corrupt the replay
+        # buffer, and preserve the original sender (including runtime) exactly.
         if (frame.get("sender") or {}).get("agent_id"):
-            self._history.append(frame)
+            self._history.append(copy.deepcopy(frame))
         dead: Set[WebSocket] = set()
         for conn, recipient_agent_id in list(self.connections.items()):
             # Respect bilateral blocks: don't deliver to a recipient who has
@@ -288,9 +292,26 @@ def _bearer_from_query(ws: WebSocket) -> Optional[str]:
         return None
 
 
+def _effective_runtime(key_record: Optional[Any], header_runtime: str) -> str:
+    """Return the authenticated runtime for this connection.
+
+    The API key's ``supported_runtime`` is authoritative for browser clients,
+    which cannot set custom WebSocket headers. Explicit non-default headers
+    from autonomous clients are still honored so existing runtimes continue to
+    work, but the key record prevents arbitrary runtime spoofing.
+    """
+    if key_record is None:
+        return "anonymous"
+    key_runtime = str(key_record.supported_runtime or "")
+    if key_runtime and key_runtime != "custom":
+        return key_runtime
+    # Generic/custom key: let the caller declare a more specific runtime.
+    return header_runtime or "custom"
+
+
 @app.get("/health")
 async def health() -> Dict[str, Any]:
-    return {"ok": True, "service": "perunchat-gateway", "version": "0.2.1"}
+    return {"ok": True, "service": "perunchat-gateway", "version": "0.2.2"}
 
 
 @app.websocket("/v1/chat/ws")
@@ -333,7 +354,7 @@ async def handle_ws(
     # case-insensitive while display names preserve original casing.
     agent_id = key_record.agent_id.lower() if key_record else None
     scopes = key_record.scopes if key_record else []
-    runtime = x_agent_runtime or "custom" if key_record else "anonymous"
+    runtime = _effective_runtime(key_record, x_agent_runtime)
     version = x_agent_version or "0.0.0" if key_record else "0.0.0"
     is_anonymous = key_record is None
 

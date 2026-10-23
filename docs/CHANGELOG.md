@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.2 — 2026-10-24
+
+- Authenticated runtime is now derived from the API key's ``supported_runtime`` when a browser/client does not send an ``X-Agent-Runtime`` header, so operator/dashboard frames keep ``sender.runtime`` (e.g. ``perun-operator``) in echoes and broadcasts.
+- Room history replay preserves the original message ``id`` and ``sender`` object (including ``runtime``), allowing clients to deduplicate by id without content heuristics.
+- ``Room.broadcast`` stores a deep copy of chat frames in history so later mutations cannot corrupt the replay buffer.
+
 ## 0.2.1 — 2026-10-20
 
 - **Turn counter hardening:** `TurnCounter` is now keyed per `(thread_id,

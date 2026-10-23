@@ -1,0 +1,113 @@
+{
+  "version": 1,
+  "project": "perunchat",
+  "source": "AGENTS.md",
+  "source_hash": "79682251bdda40e8886a43f078da4178",
+  "retained": "perunchat.agents.full",
+  "sections": [
+    {
+      "heading": "(top)",
+      "hash": "f4390d3b895de26cf26647d4511bcb25",
+      "bytes": 31,
+      "dest": [
+        {
+          "kind": "inline",
+          "required": [
+            "PerunChat",
+            "Agent Reference"
+          ]
+        }
+      ]
+    },
+    {
+      "heading": "Project overview",
+      "hash": "81f98bbe81c0800a60d484e42b0e7edc",
+      "bytes": 510,
+      "dest": [
+        {
+          "kind": "inline",
+          "required": [
+            "PerunChat is the federated agent-to-agent communication subsystem",
+            "secure WebSocket/gRPC ingress gateway"
+          ]
+        }
+      ]
+    },
+    {
+      "heading": "Server / company access",
+      "hash": "2679a9d2f409de436d9c935d6f1ae14c",
+      "bytes": 631,
+      "dest": [
+        {
+          "kind": "context",
+          "key": "perunchat.context.access"
+        }
+      ]
+    },
+    {
+      "heading": "Build & test pipeline",
+      "hash": "3c2daafb16b14a717b075930d42a4899",
+      "bytes": 323,
+      "dest": [
+        {
+          "kind": "context",
+          "key": "perunchat.context.build"
+        }
+      ]
+    },
+    {
+      "heading": "Run the local gateway",
+      "hash": "2786a2af34617aa3bf5e3fa98e5146f9",
+      "bytes": 617,
+      "dest": [
+        {
+          "kind": "context",
+          "key": "perunchat.context.gateway"
+        }
+      ]
+    },
+    {
+      "heading": "Code search",
+      "hash": "bdc6378c395ac98ac3967fddbeddf879",
+      "bytes": 179,
+      "dest": [
+        {
+          "kind": "inline",
+          "required": [
+            "Read `docs/CODEMAP.md` first",
+            "Use `perun_grep` / `perun_ast_grep`"
+          ]
+        }
+      ]
+    },
+    {
+      "heading": "Memory protocol",
+      "hash": "ff44b7d785feb586a1a502c3dde07a07",
+      "bytes": 142,
+      "dest": [
+        {
+          "kind": "context",
+          "key": "perunchat.context.memory"
+        }
+      ]
+    },
+    {
+      "heading": "Critical constraints",
+      "hash": "6cd551941073d86fa83b0fbaa9a9e7a5",
+      "bytes": 997,
+      "dest": [
+        {
+          "kind": "inline",
+          "required": [
+            "Do not commit secrets",
+            "Information plane separation",
+            "HITL is mandatory",
+            "Coordinate with `perun-in-the-machine`",
+            "Dashboard secret injection"
+          ]
+        }
+      ]
+    }
+  ],
+  "notes": "Losslessness contract for perunchat AGENTS.md distillation."
+}
