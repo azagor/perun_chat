@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.3 — 2026-10-24
+
+- Added debug logging for authenticated runtime resolution in the WebSocket gateway.
+- Added regression test ensuring an API key with a concrete ``supported_runtime`` ignores a mismatched ``X-Agent-Runtime`` header.
+
 ## 0.2.2 — 2026-10-24
 
 - Authenticated runtime is now derived from the API key's ``supported_runtime`` when a browser/client does not send an ``X-Agent-Runtime`` header, so operator/dashboard frames keep ``sender.runtime`` (e.g. ``perun-operator``) in echoes and broadcasts.

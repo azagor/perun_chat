@@ -304,14 +304,23 @@ def _effective_runtime(key_record: Optional[Any], header_runtime: str) -> str:
         return "anonymous"
     key_runtime = str(key_record.supported_runtime or "")
     if key_runtime and key_runtime != "custom":
+        logger.debug(
+            "Using key runtime %r for agent %s (header was %r)",
+            key_runtime, key_record.agent_id, header_runtime,
+        )
         return key_runtime
     # Generic/custom key: let the caller declare a more specific runtime.
-    return header_runtime or "custom"
+    runtime = header_runtime or "custom"
+    logger.debug(
+        "Using header/runtime %r for agent %s (key runtime is generic)",
+        runtime, key_record.agent_id,
+    )
+    return runtime
 
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:
-    return {"ok": True, "service": "perunchat-gateway", "version": "0.2.2"}
+    return {"ok": True, "service": "perunchat-gateway", "version": "0.2.3"}
 
 
 @app.websocket("/v1/chat/ws")

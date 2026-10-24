@@ -393,3 +393,215 @@ def test_history_replay_preserves_original_id_and_runtime() -> None:
                 assert replay["sender"]["agent_id"] == "alice"
                 assert replay["sender"]["runtime"] == "perun"
 
+
+def test_concrete_runtime_key_ignores_mismatched_header() -> None:
+    """A key with a concrete supported_runtime is authoritative; a client cannot
+    override it via X-Agent-Runtime."""
+    import time
+    raw, _ = gateway.keystore.create(
+        owner_id="owner-concrete",
+        agent_id="concrete-agent",
+        supported_runtime="perun",
+        scopes=["pub:global:concrete"],
+    )
+    room_id = "pub:global:concrete"
+    now_ms = int(time.time() * 1000)
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/v1/chat/ws", headers=_headers_optional_runtime(raw, "concrete-agent", "openclaw")
+        ) as ws:
+            ws.send_text(
+                json.dumps(
+                    {"type": "ROOM_JOIN", "room_id": room_id, "room_type": "PUBLIC"}
+                )
+            )
+            json.loads(ws.receive_text())  # ROOM_JOINED
+
+            ws.send_text(
+                json.dumps(
+                    {
+                        "id": "msg_concrete",
+                        "trace_id": "trc_concrete",
+                        "thread_id": "default",
+                        "sequence_number": 1,
+                        "timestamp": now_ms,
+                        "room_type": "PUBLIC",
+                        "room_id": room_id,
+                        "sender": {"agent_id": "concrete-agent", "runtime": "openclaw"},
+                        "content_type": "text/plain",
+                        "turn_count": 0,
+                        "payload": "concrete runtime",
+                    }
+                )
+            )
+            echo = json.loads(ws.receive_text())
+            assert echo["payload"] == "concrete runtime"
+            # The key's supported_runtime wins over the header.
+            assert echo["sender"]["runtime"] == "perun"
+
+
+def _headers_optional_runtime(key: str, agent_id: str = "test-agent", runtime: str | None = "custom") -> dict:
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "X-Agent-ID": agent_id,
+    }
+    if runtime is not None:
+        headers["X-Agent-Runtime"] = runtime
+    return headers
+
+
+def test_runtime_from_key_record_is_preserved_in_echo() -> None:
+    """Browser clients cannot set X-Agent-Runtime, so the gateway must use the
+    API key's registered runtime and preserve it in the echo/broadcast."""
+    import time
+    raw, _ = gateway.keystore.create(
+        owner_id="owner-runtime",
+        agent_id="operator-agent",
+        supported_runtime="perun-operator",
+        scopes=["pub:global:runtime"],
+    )
+    room_id = "pub:global:runtime"
+    now_ms = int(time.time() * 1000)
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/v1/chat/ws", headers=_headers_optional_runtime(raw, "operator-agent", None)
+        ) as ws:
+            ws.send_text(
+                json.dumps(
+                    {"type": "ROOM_JOIN", "room_id": room_id, "room_type": "PUBLIC"}
+                )
+            )
+            json.loads(ws.receive_text())  # ROOM_JOINED
+
+            ws.send_text(
+                json.dumps(
+                    {
+                        "id": "msg_operator",
+                        "trace_id": "trc_operator",
+                        "thread_id": "default",
+                        "sequence_number": 1,
+                        "timestamp": now_ms,
+                        "room_type": "PUBLIC",
+                        "room_id": room_id,
+                        "sender": {"agent_id": "operator-agent", "runtime": "perun-operator"},
+                        "content_type": "text/plain",
+                        "turn_count": 0,
+                        "payload": "operator here",
+                    }
+                )
+            )
+            echo = json.loads(ws.receive_text())
+            assert echo["payload"] == "operator here"
+            assert echo["sender"]["runtime"] == "perun-operator"
+
+
+def test_explicit_runtime_header_used_for_generic_key() -> None:
+    """Autonomous clients with a generic/custom key may declare a specific
+    runtime via the X-Agent-Runtime header."""
+    import time
+    raw, _ = gateway.keystore.create(
+        owner_id="owner-generic",
+        agent_id="generic-agent",
+        supported_runtime="custom",
+        scopes=["pub:global:generic"],
+    )
+    room_id = "pub:global:generic"
+    now_ms = int(time.time() * 1000)
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/v1/chat/ws", headers=_headers_optional_runtime(raw, "generic-agent", "openclaw")
+        ) as ws:
+            ws.send_text(
+                json.dumps(
+                    {"type": "ROOM_JOIN", "room_id": room_id, "room_type": "PUBLIC"}
+                )
+            )
+            json.loads(ws.receive_text())  # ROOM_JOINED
+
+            ws.send_text(
+                json.dumps(
+                    {
+                        "id": "msg_generic",
+                        "trace_id": "trc_generic",
+                        "thread_id": "default",
+                        "sequence_number": 1,
+                        "timestamp": now_ms,
+                        "room_type": "PUBLIC",
+                        "room_id": room_id,
+                        "sender": {"agent_id": "generic-agent", "runtime": "openclaw"},
+                        "content_type": "text/plain",
+                        "turn_count": 0,
+                        "payload": "openclaw here",
+                    }
+                )
+            )
+            echo = json.loads(ws.receive_text())
+            assert echo["payload"] == "openclaw here"
+            assert echo["sender"]["runtime"] == "openclaw"
+
+
+def test_history_replay_preserves_original_id_and_runtime() -> None:
+    """Late joiners must receive history with the original message id and
+    sender runtime so clients can deduplicate by id without content heuristics."""
+    import time
+    alice_key = gateway.keystore.create(
+        owner_id="owner-alice",
+        agent_id="alice",
+        supported_runtime="perun",
+        scopes=["pub:global:replay"],
+    )[0]
+    bob_key = gateway.keystore.create(
+        owner_id="owner-bob",
+        agent_id="bob",
+        supported_runtime="perun",
+        scopes=["pub:global:replay"],
+    )[0]
+    room_id = "pub:global:replay"
+    now_ms = int(time.time() * 1000)
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/v1/chat/ws", headers=_headers_optional_runtime(alice_key, "alice", "perun")
+        ) as ws1:
+            ws1.send_text(
+                json.dumps(
+                    {"type": "ROOM_JOIN", "room_id": room_id, "room_type": "PUBLIC"}
+                )
+            )
+            json.loads(ws1.receive_text())  # ROOM_JOINED
+
+            ws1.send_text(
+                json.dumps(
+                    {
+                        "id": "msg_stable_42",
+                        "trace_id": "trc_stable",
+                        "thread_id": "default",
+                        "sequence_number": 1,
+                        "timestamp": now_ms,
+                        "room_type": "PUBLIC",
+                        "room_id": room_id,
+                        "sender": {"agent_id": "alice", "runtime": "perun"},
+                        "content_type": "text/plain",
+                        "turn_count": 0,
+                        "payload": "stable id",
+                    }
+                )
+            )
+            json.loads(ws1.receive_text())  # own echo
+
+            with client.websocket_connect(
+                "/v1/chat/ws", headers=_headers_optional_runtime(bob_key, "bob", "perun")
+            ) as ws2:
+                ws2.send_text(
+                    json.dumps(
+                        {"type": "ROOM_JOIN", "room_id": room_id, "room_type": "PUBLIC"}
+                    )
+                )
+                ack = json.loads(ws2.receive_text())
+                assert ack["type"] == "ROOM_JOINED"
+
+                replay = json.loads(ws2.receive_text())
+                assert replay["id"] == "msg_stable_42"
+                assert replay["payload"] == "stable id"
+                assert replay["sender"]["agent_id"] == "alice"
+                assert replay["sender"]["runtime"] == "perun"
+
