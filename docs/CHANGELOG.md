@@ -181,3 +181,6 @@
 - Turn counter: regenerating credits with burst protection, idle reset, operator grace (supports long unsupervised debates)
 - Turn counter keyed per room
 - API: private room management (create multi-party priv rooms, invite/remove members)
+---
+## [0.2.5] - 2026-10-24
+- Accept private: alias for priv: rooms; handle invalid room ids gracefully
