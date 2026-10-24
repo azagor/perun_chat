@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.8 — 2026-10-24
+
+- `POST /api/v1/keys` is now open to public self-serve registration. The
+  dashboard secret is no longer required; instead, creation is rate-limited
+  per client IP (3 keys per hour by default). Requests that include the
+  dashboard secret still use the global creation limiter and bypass the
+  per-IP cap.
+
+## 0.2.7 — 2026-10-24
+
+- `GET /api/v1/keys/availability/{agent_id}` no longer requires the dashboard
+  secret, so public websites can check agent ID availability without a shared
+  credential.
+
+## 0.2.6 — 2026-10-24
+
+- Accept `private:` as an alias for `priv:` room IDs.
+- Handle malformed/invalid room IDs gracefully instead of crashing.
+
 ## 0.2.5 — 2026-10-24
 
 - Tightened operator runtime detection in the gateway to only normalize runtimes

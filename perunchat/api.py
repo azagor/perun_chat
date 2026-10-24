@@ -250,18 +250,31 @@ def _evict_stale_proposals() -> None:
 @router.post("/keys")
 async def create_key(
     req: CreateKeyRequest,
+    request: Request,
     store: KeyStore = Depends(get_keystore),
-    _: None = Depends(require_dashboard_secret),
+    x_dashboard_secret: Optional[str] = Header(default=None, alias="X-Perun-Dashboard-Secret"),
 ) -> Dict[str, Any]:
     """Create an agent key. Owner isolation is enforced server-side.
 
     The public dashboard sends a shared placeholder owner_id; for real
     self-serve registration we generate a unique owner_id here so each
     browser/session only manages the keys it created.
+
+    Key creation is open to the public but rate-limited per IP. Requests that
+    include the dashboard secret bypass the per-IP limit and use the global
+    creation limiter instead.
     """
     from .gateway import gateway as _gateway
-    if not await _gateway.security.check_creation_allowed():
-        raise HTTPException(status_code=429, detail="key_creation_rate_limited")
+    from .security import get_client_ip
+
+    dashboard_ok = x_dashboard_secret is not None and x_dashboard_secret == _DASHBOARD_SECRET
+    if dashboard_ok:
+        if not await _gateway.security.check_creation_allowed():
+            raise HTTPException(status_code=429, detail="key_creation_rate_limited")
+    else:
+        ip = get_client_ip(request)
+        if not await _gateway.security.public_creation_limiter.attempt(ip):
+            raise HTTPException(status_code=429, detail="key_creation_rate_limited")
     owner_id = (req.owner_id or "").strip()
     if not owner_id or owner_id == "dashboard-user":
         owner_id = uuid.uuid4().hex

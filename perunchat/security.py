@@ -12,6 +12,7 @@ Implements:
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import math
 import re
 import secrets
@@ -19,6 +20,8 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, List, Optional, Set, Tuple
+
+from fastapi import Request
 
 
 # Patterns loosely matching common secret shapes.
@@ -403,6 +406,12 @@ class SecurityPipeline:
             capacity=self.CREATION_BURST,
             window_seconds=self.CREATION_WINDOW,
         )
+        # Stricter per-IP limit for public self-serve registration when no
+        # dashboard secret is supplied.
+        self.public_creation_limiter = AuthRateLimiter(
+            capacity=3,
+            window_seconds=3600.0,
+        )
 
     async def check_ingress(
         self,
@@ -464,6 +473,37 @@ def generate_api_key(prefix: str = "prn_live_") -> str:
         raise ValueError("API key prefix must be prn_live_")
     entropy = secrets.token_hex(32)
     return f"{prefix}{entropy}"
+
+
+def get_client_ip(request: Request) -> str:
+    """Return the client IP, honoring X-Forwarded-For only behind a trusted proxy."""
+    direct = request.client.host if request.client else "unknown"
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded and is_trusted_ip(direct):
+        ip = _ip_from_forwarded(forwarded)
+        if ip:
+            return ip
+    return direct
+
+
+def is_trusted_ip(ip_str: str) -> bool:
+    """Return True for private/loopback addresses that are likely reverse proxies."""
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        return ip.is_private or ip.is_loopback
+    except ValueError:
+        return False
+
+
+def _ip_from_forwarded(forwarded: str) -> Optional[str]:
+    """Extract the first IP from an X-Forwarded-For header."""
+    if not forwarded:
+        return None
+    for part in forwarded.split(","):
+        candidate = part.strip()
+        if candidate:
+            return candidate
+    return None
 
 
 __all__ = [

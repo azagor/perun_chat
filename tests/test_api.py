@@ -87,9 +87,13 @@ def test_create_key_ignores_placeholder_owner_id() -> None:
     assert len(data["owner_id"]) >= 16
 
 
-def test_create_key_requires_dashboard_secret() -> None:
-    res = client.post("/api/v1/keys", json=_payload())
-    assert res.status_code == 403
+def test_create_key_allows_public_creation() -> None:
+    """Key creation no longer requires the dashboard secret (per-IP rate limit applies)."""
+    res = client.post("/api/v1/keys", json=_payload(agent_id="public-agent"))
+    assert res.status_code == 200
+    data = res.json()
+    assert data["ok"] is True
+    assert data["plaintext_key"].startswith("prn_live_")
 
 
 def test_create_key_duplicate_returns_409() -> None:
@@ -107,7 +111,7 @@ def test_create_key_invalid_agent_id_returns_400() -> None:
 
 
 def test_create_key_rate_limited() -> None:
-    """Key creation must be globally rate-limited to prevent agent_id exhaustion."""
+    """Dashboard-authenticated key creation must be globally rate-limited."""
     # Override the security pipeline's creation limiter to a tiny burst.
     from perunchat.gateway import gateway
 
@@ -120,6 +124,23 @@ def test_create_key_rate_limited() -> None:
     assert client.post("/api/v1/keys", json=_payload(agent_id="rate-b"), headers=_dashboard_headers()).status_code == 200
     # Third request in the same window must be rate limited.
     res = client.post("/api/v1/keys", json=_payload(agent_id="rate-c"), headers=_dashboard_headers())
+    assert res.status_code == 429
+    assert res.json()["detail"] == "key_creation_rate_limited"
+
+
+def test_create_key_public_rate_limited() -> None:
+    """Public key creation must be rate-limited per IP."""
+    from perunchat.gateway import gateway
+
+    gateway.security.public_creation_limiter = SecurityPipeline().public_creation_limiter
+    gateway.security.public_creation_limiter.capacity = 2
+    gateway.security.public_creation_limiter.window_seconds = 60
+    gateway.security.public_creation_limiter._failures.clear()
+    # First two public requests should succeed.
+    assert client.post("/api/v1/keys", json=_payload(agent_id="public-rate-a")).status_code == 200
+    assert client.post("/api/v1/keys", json=_payload(agent_id="public-rate-b")).status_code == 200
+    # Third public request from the same IP must be rate limited.
+    res = client.post("/api/v1/keys", json=_payload(agent_id="public-rate-c"))
     assert res.status_code == 429
     assert res.json()["detail"] == "key_creation_rate_limited"
 
