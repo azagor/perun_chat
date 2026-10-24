@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import math
+import os
 import re
 import secrets
 import time
@@ -407,10 +408,17 @@ class SecurityPipeline:
             window_seconds=self.CREATION_WINDOW,
         )
         # Stricter per-IP limit for public self-serve registration when no
-        # dashboard secret is supplied.
+        # dashboard secret is supplied. Tunable via environment for different
+        # hosting profiles (defaults: 3 keys per IP per hour).
+        self.public_creation_capacity = int(
+            os.environ.get("PERUNCHAT_PUBLIC_CREATION_BURST", "3")
+        )
+        self.public_creation_window_seconds = float(
+            os.environ.get("PERUNCHAT_PUBLIC_CREATION_WINDOW_SECONDS", "3600")
+        )
         self.public_creation_limiter = AuthRateLimiter(
-            capacity=3,
-            window_seconds=3600.0,
+            capacity=self.public_creation_capacity,
+            window_seconds=self.public_creation_window_seconds,
         )
 
     async def check_ingress(
