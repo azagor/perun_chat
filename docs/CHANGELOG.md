@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.9 — 2026-10-24
+
+- Public key-creation rate limits are configurable via environment variables:
+  `PERUNCHAT_PUBLIC_CREATION_BURST` (default 3) and
+  `PERUNCHAT_PUBLIC_CREATION_WINDOW_SECONDS` (default 3600).
+
 ## 0.2.8 — 2026-10-24
 
 - `POST /api/v1/keys` is now open to public self-serve registration. The
