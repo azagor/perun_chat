@@ -280,7 +280,66 @@ def test_runtime_from_key_record_is_preserved_in_echo() -> None:
             )
             echo = json.loads(ws.receive_text())
             assert echo["payload"] == "operator here"
-            assert echo["sender"]["runtime"] == "perun-operator"
+            assert echo["sender"]["runtime"] == "operator-agent-operator"
+
+
+def test_operator_runtime_normalized_from_perun_key() -> None:
+    """A dashboard may reuse an autonomous 'perun' key to send operator frames.
+    The gateway must detect the client-side operator marker and normalize the
+    broadcast/runtime to '<agent_id>-operator' so history replay stays labeled."""
+    import time
+    raw, _ = gateway.keystore.create(
+        owner_id="owner-operator-from-perun",
+        agent_id="perun-agent",
+        supported_runtime="perun",
+        scopes=["pub:global:operatornorm"],
+    )
+    room_id = "pub:global:operatornorm"
+    now_ms = int(time.time() * 1000)
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/v1/chat/ws", headers=_headers_optional_runtime(raw, "perun-agent", None)
+        ) as ws:
+            ws.send_text(
+                json.dumps(
+                    {"type": "ROOM_JOIN", "room_id": room_id, "room_type": "PUBLIC"}
+                )
+            )
+            json.loads(ws.receive_text())  # ROOM_JOINED
+
+            ws.send_text(
+                json.dumps(
+                    {
+                        "id": "msg_operator_norm",
+                        "trace_id": "trc_operator_norm",
+                        "thread_id": "default",
+                        "sequence_number": 1,
+                        "timestamp": now_ms,
+                        "room_type": "PUBLIC",
+                        "room_id": room_id,
+                        "sender": {"agent_id": "perun-agent", "runtime": "perun-operator"},
+                        "content_type": "text/plain",
+                        "turn_count": 0,
+                        "payload": "operator via perun key",
+                    }
+                )
+            )
+            echo = json.loads(ws.receive_text())
+            assert echo["payload"] == "operator via perun key"
+            assert echo["sender"]["runtime"] == "perun-agent-operator"
+
+            # Reconnecting client should see the same operator runtime in replay.
+            with client.websocket_connect(
+                "/v1/chat/ws", headers=_headers_optional_runtime(raw, "perun-agent", None)
+            ) as ws2:
+                ws2.send_text(
+                    json.dumps(
+                        {"type": "ROOM_JOIN", "room_id": room_id, "room_type": "PUBLIC"}
+                    )
+                )
+                json.loads(ws2.receive_text())  # ROOM_JOINED
+                replay = json.loads(ws2.receive_text())
+                assert replay["sender"]["runtime"] == "perun-agent-operator"
 
 
 def test_explicit_runtime_header_used_for_generic_key() -> None:
@@ -438,61 +497,6 @@ def test_concrete_runtime_key_ignores_mismatched_header() -> None:
             assert echo["payload"] == "concrete runtime"
             # The key's supported_runtime wins over the header.
             assert echo["sender"]["runtime"] == "perun"
-
-
-def _headers_optional_runtime(key: str, agent_id: str = "test-agent", runtime: str | None = "custom") -> dict:
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "X-Agent-ID": agent_id,
-    }
-    if runtime is not None:
-        headers["X-Agent-Runtime"] = runtime
-    return headers
-
-
-def test_runtime_from_key_record_is_preserved_in_echo() -> None:
-    """Browser clients cannot set X-Agent-Runtime, so the gateway must use the
-    API key's registered runtime and preserve it in the echo/broadcast."""
-    import time
-    raw, _ = gateway.keystore.create(
-        owner_id="owner-runtime",
-        agent_id="operator-agent",
-        supported_runtime="perun-operator",
-        scopes=["pub:global:runtime"],
-    )
-    room_id = "pub:global:runtime"
-    now_ms = int(time.time() * 1000)
-    with TestClient(app) as client:
-        with client.websocket_connect(
-            "/v1/chat/ws", headers=_headers_optional_runtime(raw, "operator-agent", None)
-        ) as ws:
-            ws.send_text(
-                json.dumps(
-                    {"type": "ROOM_JOIN", "room_id": room_id, "room_type": "PUBLIC"}
-                )
-            )
-            json.loads(ws.receive_text())  # ROOM_JOINED
-
-            ws.send_text(
-                json.dumps(
-                    {
-                        "id": "msg_operator",
-                        "trace_id": "trc_operator",
-                        "thread_id": "default",
-                        "sequence_number": 1,
-                        "timestamp": now_ms,
-                        "room_type": "PUBLIC",
-                        "room_id": room_id,
-                        "sender": {"agent_id": "operator-agent", "runtime": "perun-operator"},
-                        "content_type": "text/plain",
-                        "turn_count": 0,
-                        "payload": "operator here",
-                    }
-                )
-            )
-            echo = json.loads(ws.receive_text())
-            assert echo["payload"] == "operator here"
-            assert echo["sender"]["runtime"] == "perun-operator"
 
 
 def test_explicit_runtime_header_used_for_generic_key() -> None:

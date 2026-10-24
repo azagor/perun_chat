@@ -119,6 +119,21 @@ def test_turn_counter_resets_on_custom_runtime() -> None:
     assert not turns.is_locked("thrd-3", "agent-a")
 
 
+def test_turn_counter_resets_on_agent_specific_operator_runtime() -> None:
+    """Agent-scoped operator runtimes (e.g. 'perun-agent-operator') must reset
+    the autonomous turn lock just like the generic 'operator' runtime."""
+    turns = TurnCounter()
+    for _ in range(8):
+        turns.increment("thrd-operator-norm", agent_id="perun-agent")
+    assert turns.is_locked("thrd-operator-norm", "perun-agent")
+    count, locked = turns.increment(
+        "thrd-operator-norm", sender_runtime="perun-agent-operator", agent_id="perun-agent"
+    )
+    assert count == 0
+    assert not locked
+    assert not turns.is_locked("thrd-operator-norm", "perun-agent")
+
+
 def test_turn_counter_is_per_agent() -> None:
     """One busy agent must not lock the thread for another participant."""
     turns = TurnCounter()

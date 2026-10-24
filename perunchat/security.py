@@ -237,7 +237,11 @@ class TurnCounter:
         key = self._key(thread_id, agent_id)
         now = time.time()
         self._last_seen[key] = now
-        if sender_runtime in self.OPERATOR_RUNTIMES:
+        is_operator = (
+            sender_runtime in self.OPERATOR_RUNTIMES
+            or (isinstance(sender_runtime, str) and sender_runtime.endswith("-operator"))
+        )
+        if is_operator:
             self._counts[key] = 0
             self._locked.discard(key)
             return 0, False

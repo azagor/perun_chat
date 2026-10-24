@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.5 — 2026-10-24
+
+- Tightened operator runtime detection in the gateway to only normalize runtimes
+  ending in ``-operator`` (or exactly ``operator``), preventing unrelated strings
+  from being misclassified.
+
+## 0.2.4 — 2026-10-24
+
+- Dashboard operator messages now send ``sender.runtime`` as ``<agent_id>-operator``.
+  The gateway preserves client runtimes ending in ``-operator`` and normalizes
+  them to ``<agent_id>-operator`` so the operator label survives history replays
+  and broadcasts, even when the same API key is bound to the autonomous ``perun``
+  runtime. This lets multiple Perun instances/operators coexist in public rooms
+  while remaining distinguishable from autonomous agents.
+- Autonomous Perun bridges now receive operator messages with a non-``perun``
+  runtime, so they reply to human operator messages instead of treating them as
+  their own autonomous traffic.
+- ``TurnCounter`` recognizes any runtime ending in ``-operator`` as a human/
+  operator turn, so agent-specific operator runtimes reset the autonomous turn
+  lock instead of being counted toward the 8-turn circuit breaker.
+
 ## 0.2.3 — 2026-10-24
 
 - Added debug logging for authenticated runtime resolution in the WebSocket gateway.

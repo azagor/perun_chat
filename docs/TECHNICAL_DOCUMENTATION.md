@@ -106,14 +106,14 @@ creation time:
 2. Monotonic sequence & nonce validation per `(agent_id, runtime)` (drop
    timestamp skew > 120s). The authenticated runtime is taken from the API
    key's ``supported_runtime`` when the client does not supply a non-default
-   ``X-Agent-Runtime`` header, preserving browser/dashboard runtimes such as
-   ``perun-operator``. Separate streams for different runtimes sharing the
-   same API key (e.g. Perun's autonomous bridge `runtime=perun` vs. dashboard
-   `runtime=perun-operator`).
+   ``X-Agent-Runtime`` header. Browser/dashboard frames that declare a runtime
+   containing ``operator`` are normalized to ``<agent_id>-operator`` so the
+   operator label survives history replay and broadcasts even when the same API
+   key is otherwise bound to the autonomous ``perun`` runtime.
 3. Turn counter check (pause after 8 autonomous turns). The counter is keyed per
    `(thread_id, agent_id)`, resets on any non-autonomous runtime
-   (`operator`, `custom`, `dashboard`, `human`), and prunes stale entries to
-   bound memory.
+   (`operator`, ``<agent_id>-operator``, `custom`, `dashboard`, `human`), and
+   prunes stale entries to bound memory.
 4. Ingress/egress DLP scanner (redact secrets).
 5. Authentication-failure rate limiter (5 failures / 60 s per source IP).
 

@@ -258,7 +258,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="PerunChat Gateway",
-    version="0.2.1",
+    version="0.2.5",
     description="Runtime-agnostic federated agent-to-agent communication gateway.",
     lifespan=lifespan,
 )
@@ -320,7 +320,7 @@ def _effective_runtime(key_record: Optional[Any], header_runtime: str) -> str:
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:
-    return {"ok": True, "service": "perunchat-gateway", "version": "0.2.3"}
+    return {"ok": True, "service": "perunchat-gateway", "version": "0.2.5"}
 
 
 @app.websocket("/v1/chat/ws")
@@ -489,10 +489,20 @@ async def handle_ws(
 
             # Inject sender identity server-side before validation so clients
             # (especially browser dashboards) don't need to know their bound agent_id.
+            # Dashboards mark manual operator messages with a runtime containing
+            # "operator" (conventionally "<agent_id>-operator"). Preserve that
+            # signal across instances so the UI can always distinguish a human
+            # operator from an autonomous agent, even when the same API key is
+            # otherwise bound to the "perun" runtime.
+            client_runtime = str((envelope.get("sender") or {}).get("runtime") or "").lower()
+            if client_runtime.endswith("-operator") or client_runtime == "operator":
+                frame_runtime = f"{agent_id}-operator"
+            else:
+                frame_runtime = runtime
             frame = envelope
             frame.setdefault("sender", {})
             frame["sender"]["agent_id"] = agent_id
-            frame["sender"]["runtime"] = runtime
+            frame["sender"]["runtime"] = frame_runtime
             frame["sender"]["version"] = version
 
             # Reject oversized payloads before any further processing.
@@ -529,7 +539,7 @@ async def handle_ws(
                 sequence_number=seq,
                 timestamp_ms=ts,
                 thread_id=thread_id,
-                runtime=runtime,
+                runtime=frame_runtime,
                 nonce=envelope.get("id"),
             )
             if not ok:
