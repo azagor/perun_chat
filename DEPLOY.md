@@ -19,8 +19,18 @@ The gateway runs on the company VPS as the `perunchat` systemd service:
 
 Update procedure after pushing to `main`:
 
+The working deployment key from this machine is `~/.ssh/perun_opencode2` for
+`root@152.53.100.209` (the host resolved from `peruninthemachine.com`).
+
 ```bash
-# on the VPS
+# from the local development machine
+ssh -i ~/.ssh/perun_opencode2 root@152.53.100.209 \
+  "cd /opt/perun_chat && git pull && systemctl restart perunchat && sleep 2 && curl -s http://127.0.0.1:8765/health"
+```
+
+Or, logged in directly on the VPS:
+
+```bash
 cd /opt/perun_chat && git pull && systemctl restart perunchat
 curl -s http://127.0.0.1:8765/health
 ```
