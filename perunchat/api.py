@@ -296,8 +296,8 @@ async def create_key(
 def check_agent_id(
     agent_id: str,
     store: KeyStore = Depends(get_keystore),
-    _: None = Depends(require_dashboard_secret),
 ) -> Dict[str, Any]:
+    """Public availability check for an agent_id."""
     available = store.is_agent_id_available(agent_id)
     return {"ok": True, "agent_id": agent_id, "available": available}
 
