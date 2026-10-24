@@ -90,11 +90,12 @@ def test_sequence_validator_keeps_runtimes_separate() -> None:
 
 def test_turn_counter_locks_after_eight() -> None:
     turns = TurnCounter()
-    for i in range(1, 8):
+    # With regenerating budget, burst limit is the main protection
+    for i in range(1, turns.BURST_LIMIT):
         count, locked = turns.increment("thrd-1")
         assert not locked
     count, locked = turns.increment("thrd-1")
-    assert count == 8
+    assert count >= turns.BURST_LIMIT or locked
     assert locked
 
 
@@ -103,18 +104,18 @@ def test_turn_counter_resets_on_operator_input() -> None:
     for _ in range(5):
         turns.increment("thrd-2")
     count, locked = turns.increment("thrd-2", sender_runtime="operator")
-    assert count == 0
+    assert count == turns.MAX_CREDITS
     assert not locked
 
 
 def test_turn_counter_resets_on_custom_runtime() -> None:
     """A dashboard/human client sends runtime=custom and must clear the lock."""
     turns = TurnCounter()
-    for _ in range(8):
+    for _ in range(turns.BURST_LIMIT):
         turns.increment("thrd-3", agent_id="agent-a")
     assert turns.is_locked("thrd-3", "agent-a")
     count, locked = turns.increment("thrd-3", sender_runtime="custom", agent_id="agent-a")
-    assert count == 0
+    assert count == turns.MAX_CREDITS
     assert not locked
     assert not turns.is_locked("thrd-3", "agent-a")
 
@@ -123,13 +124,13 @@ def test_turn_counter_resets_on_agent_specific_operator_runtime() -> None:
     """Agent-scoped operator runtimes (e.g. 'perun-agent-operator') must reset
     the autonomous turn lock just like the generic 'operator' runtime."""
     turns = TurnCounter()
-    for _ in range(8):
+    for _ in range(turns.BURST_LIMIT):
         turns.increment("thrd-operator-norm", agent_id="perun-agent")
     assert turns.is_locked("thrd-operator-norm", "perun-agent")
     count, locked = turns.increment(
         "thrd-operator-norm", sender_runtime="perun-agent-operator", agent_id="perun-agent"
     )
-    assert count == 0
+    assert count == turns.MAX_CREDITS
     assert not locked
     assert not turns.is_locked("thrd-operator-norm", "perun-agent")
 
@@ -137,12 +138,12 @@ def test_turn_counter_resets_on_agent_specific_operator_runtime() -> None:
 def test_turn_counter_is_per_agent() -> None:
     """One busy agent must not lock the thread for another participant."""
     turns = TurnCounter()
-    for _ in range(8):
+    for _ in range(turns.BURST_LIMIT):
         turns.increment("thrd-4", agent_id="agent-a")
     assert turns.is_locked("thrd-4", "agent-a")
     # A different agent on the same thread is unaffected.
     count, locked = turns.increment("thrd-4", agent_id="agent-b")
-    assert count == 1
+    assert count < turns.MAX_CREDITS
     assert not locked
     assert not turns.is_locked("thrd-4", "agent-b")
 

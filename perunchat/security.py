@@ -5,7 +5,7 @@ Implements:
   - egress DLP scanning and redaction
   - token-bucket rate limiting (async-safe)
   - monotonic sequence / nonce / timestamp validation
-  - per-thread turn counter and circuit breaker
+  - per-room regenerating turn budget and circuit breaker
   - authentication-failure rate limiting
 """
 
@@ -16,8 +16,9 @@ import math
 import re
 import secrets
 import time
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 
 
 # Patterns loosely matching common secret shapes.
@@ -193,86 +194,155 @@ class SequenceValidator:
 
 class TurnCounter:
     """
-    Tracks autonomous turns per thread. Circuit breaks at 8 consecutive turns
-    without operator input, setting state LOCKED_PENDING_OPERATOR.
+    Tracks autonomous turns per (room_id, agent_id) with a regenerating
+    credit budget and burst protection.
 
-    The counter exists to stop two *autonomous* agents ping-ponging forever. It
-    must not silence a room in which a human is present, so:
-    - it is keyed per ``thread_id`` **and** agent, so one busy agent cannot lock
-      the thread for everyone else; and
-    - any non-autonomous runtime (``operator``, ``custom``, ``dashboard``, ...)
-      resets the agent's own counter, so a human/dashboard message always
-      clears the lock.
-
-    To prevent unbounded memory growth on long-lived gateways, entries older
-    than ``PRUNE_AGE_SECONDS`` are removed by ``prune()`` (called from a
-    background task) and the dict is capped at ``MAX_KEYS``.
+    - Credits refill over time (allows long unsupervised debates)
+    - Hard burst cap kills rapid ping-pong
+    - Long inactivity resets the budget (fresh start after breaks)
+    - Operator presence grants a grace window (more permissive)
     """
 
-    LIMIT = 8
-    # Runtimes that represent a human/operator-driven client rather than an
-    # autonomous loop. Anything not listed here counts as autonomous.
+    # Regenerating budget
+    MAX_CREDITS = 200
+    REFILL_RATE = 1.0
+    REFILL_INTERVAL = 75.0
+
+    # Burst protection
+    BURST_LIMIT = 25
+    BURST_SECONDS = 60.0
+
+    # Inactivity forgiveness
+    IDLE_RESET_SECONDS = 900.0
+
+    # Operator grace
+    OPERATOR_GRACE_SECONDS = 600.0
+
+    # Runtimes that represent a human/operator-driven client
     OPERATOR_RUNTIMES = {"operator", "custom", "dashboard", "human"}
-    PRUNE_AGE_SECONDS = 3600.0  # 1 hour
+
+    PRUNE_AGE_SECONDS = 3600.0
     MAX_KEYS = 10000
 
     def __init__(self) -> None:
-        self._counts: Dict[str, int] = {}
+        self._credits: Dict[str, float] = {}
+        self._last_update: Dict[str, float] = {}
+        self._last_turn: Dict[str, float] = {}
         self._locked: Set[str] = set()
         self._last_seen: Dict[str, float] = {}
+        self._last_operator_seen: Dict[str, float] = {}
+        self._room_last_activity: Dict[str, float] = {}
+        self._recent_turns: Dict[str, Deque[float]] = {}
 
     @staticmethod
-    def _key(thread_id: str, agent_id: str) -> str:
-        return f"{thread_id}\u0000{agent_id}"
+    def _key(room_id: str, agent_id: str) -> str:
+        return f"{room_id}\u0000{agent_id}"
 
-    def is_locked(self, thread_id: str, agent_id: str = "") -> bool:
-        return self._key(thread_id, agent_id) in self._locked
+    def _refill(self, key: str, now: float) -> float:
+        last_upd = self._last_update.get(key, now)
+        elapsed = now - last_upd
+        if elapsed <= 0:
+            return self._credits.get(key, float(self.MAX_CREDITS))
 
-    def increment(self, thread_id: str, sender_runtime: Optional[str] = None,
-                  agent_id: str = "") -> Tuple[int, bool]:
+        last_turn = self._last_turn.get(key, 0.0)
+        if last_turn and (now - last_turn) > self.IDLE_RESET_SECONDS:
+            self._credits[key] = float(self.MAX_CREDITS)
+            self._last_update[key] = now
+            self._last_turn[key] = now
+            return self._credits[key]
+
+        gained = elapsed / self.REFILL_INTERVAL * self.REFILL_RATE
+        credits = min(self.MAX_CREDITS, self._credits.get(key, float(self.MAX_CREDITS)) + gained)
+        self._credits[key] = credits
+        self._last_update[key] = now
+        return credits
+
+    def is_locked(self, room_id: str, agent_id: str = "") -> bool:
+        return self._key(room_id, agent_id) in self._locked
+
+    def increment(self, room_id: str, sender_runtime: Optional[str] = None,
+                  agent_id: str = "") -> Tuple[float, bool]:
         """
-        Increment turn counter for a thread. Returns (new_count, is_locked).
-        Operator runtime resets the counter; autonomous runtimes increment it.
+        Increment turn counter for a room. Returns (credits_remaining, is_locked).
+        Operator runtime resets the budget and grants room grace.
+        Autonomous turns consume credits with burst protection.
         """
-        key = self._key(thread_id, agent_id)
+        key = self._key(room_id, agent_id)
         now = time.time()
         self._last_seen[key] = now
+        self._room_last_activity[room_id] = now
+
         is_operator = (
             sender_runtime in self.OPERATOR_RUNTIMES
             or (isinstance(sender_runtime, str) and sender_runtime.endswith("-operator"))
         )
+
         if is_operator:
-            self._counts[key] = 0
+            self._credits[key] = float(self.MAX_CREDITS)
+            self._last_update[key] = now
+            self._last_turn[key] = now
             self._locked.discard(key)
-            return 0, False
+            self._last_operator_seen[room_id] = now
+            if key in self._recent_turns:
+                self._recent_turns[key].clear()
+            return float(self.MAX_CREDITS), False
 
-        self._counts[key] = self._counts.get(key, 0) + 1
-        count = self._counts[key]
-        if count >= self.LIMIT:
+        last_op = self._last_operator_seen.get(room_id, 0.0)
+        supervised = (now - last_op) < self.OPERATOR_GRACE_SECONDS
+
+        credits = self._refill(key, now)
+
+        dq = self._recent_turns.setdefault(key, deque())
+        while dq and dq[0] < now - self.BURST_SECONDS:
+            dq.popleft()
+        dq.append(now)
+
+        if len(dq) >= self.BURST_LIMIT and not supervised:
             self._locked.add(key)
-            return count, True
-        return count, False
+            return credits, True
 
-    def reset(self, thread_id: str, agent_id: str = "") -> None:
-        key = self._key(thread_id, agent_id)
-        self._counts.pop(key, None)
+        if credits < 1.0 and not supervised:
+            self._locked.add(key)
+            return credits, True
+
+        if not supervised:
+            self._credits[key] = credits - 1.0
+        else:
+            self._credits[key] = float(self.MAX_CREDITS)
+
+        self._last_update[key] = now
+        self._last_turn[key] = now
+        self._locked.discard(key)
+        return self._credits[key], False
+
+    def reset(self, room_id: str, agent_id: str = "") -> None:
+        key = self._key(room_id, agent_id)
+        self._credits.pop(key, None)
+        self._last_update.pop(key, None)
+        self._last_turn.pop(key, None)
         self._locked.discard(key)
         self._last_seen.pop(key, None)
+        self._recent_turns.pop(key, None)
 
     def prune(self) -> int:
         """Remove stale entries. Returns number of removed keys."""
-        cutoff = time.time() - self.PRUNE_AGE_SECONDS
+        now = time.time()
+        cutoff = now - self.PRUNE_AGE_SECONDS
         stale = [k for k, t in self._last_seen.items() if t < cutoff]
-        # If still over the cap, remove oldest entries regardless of age.
         if len(self._last_seen) - len(stale) > self.MAX_KEYS:
             survivors = {k: t for k, t in self._last_seen.items() if t >= cutoff}
             sorted_keys = sorted(survivors, key=survivors.get)
             extra = len(survivors) - self.MAX_KEYS
             stale.extend(sorted_keys[:extra])
         for key in stale:
-            self._counts.pop(key, None)
+            self._credits.pop(key, None)
+            self._last_update.pop(key, None)
+            self._last_turn.pop(key, None)
             self._locked.discard(key)
             self._last_seen.pop(key, None)
+            self._recent_turns.pop(key, None)
+        self._last_operator_seen = {r: t for r, t in self._last_operator_seen.items() if t >= cutoff}
+        self._room_last_activity = {r: t for r, t in self._room_last_activity.items() if t >= cutoff}
         return len(stale)
 
 
@@ -352,7 +422,7 @@ class SecurityPipeline:
         if not ok:
             return False, reason
 
-        count, locked = self.turns.increment(thread_id, runtime, agent_id)
+        count, locked = self.turns.increment(room_id, runtime, agent_id)
         if locked:
             return False, "thread_locked_pending_operator"
 

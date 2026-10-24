@@ -83,6 +83,15 @@ class BlockRequest(BaseModel):
     blocked_agent_id: str
 
 
+class CreatePrivateRoomRequest(BaseModel):
+    members: List[str]
+    room_id: str | None = None
+
+
+class AddRoomMemberRequest(BaseModel):
+    agent_id: str
+
+
 def get_keystore() -> KeyStore:
     return keystore
 
@@ -198,6 +207,30 @@ def _on_friendship_removed(agent_a: str, agent_b: str) -> None:
         if members:
             members.discard(a)
             members.discard(b)
+    except Exception:
+        pass
+
+
+def _add_agent_to_room_acl(room_id: str, agent_id: str) -> None:
+    aid = agent_id.lower()
+    _persist_room_member(room_id, aid)
+    try:
+        from .gateway import gateway
+
+        gateway.rooms.add_member(room_id, aid)
+    except Exception:
+        pass
+
+
+def _remove_agent_from_room_acl(room_id: str, agent_id: str) -> None:
+    aid = agent_id.lower()
+    _remove_room_member(room_id, aid)
+    try:
+        from .gateway import gateway
+
+        members = getattr(gateway.rooms, "_acls", {}).get(room_id)
+        if members:
+            members.discard(aid)
     except Exception:
         pass
 
@@ -492,6 +525,127 @@ def unblock_agent(
     except SocialGraphError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"ok": True, "unblocked": result}
+
+
+@router.post("/rooms/private")
+def create_private_room(
+    req: CreatePrivateRoomRequest,
+    caller: AgentKey = Depends(get_current_agent),
+) -> Dict[str, Any]:
+    import uuid
+
+    members = set()
+    members.add(caller.agent_id.lower())
+    for m in req.members or []:
+        if m and m.strip():
+            members.add(m.strip().lower())
+    if len(members) < 2:
+        raise HTTPException(status_code=400, detail="need_at_least_two_members")
+    if req.room_id and req.room_id.strip():
+        room_id = req.room_id.strip()
+        if not room_id.startswith("priv:"):
+            raise HTTPException(status_code=400, detail="private_room_must_start_with_priv:")
+    elif len(members) == 2:
+        a, b = sorted(members)
+        room_id = private_room_id(a, b)
+    else:
+        room_id = f"priv:m:{uuid.uuid4().hex}"
+    for m in members:
+        _add_agent_to_room_acl(room_id, m)
+    return {"ok": True, "room_id": room_id, "members": sorted(list(members))}
+
+
+@router.get("/rooms/private")
+def list_private_rooms(
+    caller: AgentKey = Depends(get_current_agent),
+) -> Dict[str, Any]:
+    agent_id = caller.agent_id.lower()
+    try:
+        with db_module.db(config.db_path()) as conn:
+            rows = conn.execute(
+                "SELECT room_id FROM room_members WHERE agent_id = ?",
+                (agent_id,),
+            ).fetchall()
+    except Exception:
+        rows = []
+    private_rooms = []
+    for row in rows:
+        room_id = row["room_id"]
+        if room_id.startswith("priv:"):
+            private_rooms.append(room_id)
+    return {"ok": True, "rooms": sorted(set(private_rooms))}
+
+
+@router.get("/rooms/{room_id}/members")
+def get_room_members(
+    room_id: str,
+    caller: AgentKey = Depends(get_current_agent),
+) -> Dict[str, Any]:
+    agent_id = caller.agent_id.lower()
+    try:
+        from .gateway import gateway
+
+        if agent_id not in gateway.rooms._acls.get(room_id, set()):
+            if not gateway.rooms.can_join(room_id, agent_id, list(caller.scopes or [])):
+                raise HTTPException(status_code=403, detail="not_allowed")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    try:
+        with db_module.db(config.db_path()) as conn:
+            rows = conn.execute(
+                "SELECT agent_id FROM room_members WHERE room_id = ?",
+                (room_id,),
+            ).fetchall()
+        members = [r["agent_id"] for r in rows]
+    except Exception:
+        members = []
+    return {"ok": True, "room_id": room_id, "members": sorted(members)}
+
+
+@router.post("/rooms/{room_id}/members")
+def add_room_member(
+    room_id: str,
+    req: AddRoomMemberRequest,
+    caller: AgentKey = Depends(get_current_agent),
+) -> Dict[str, Any]:
+    agent_id = caller.agent_id.lower()
+    try:
+        from .gateway import gateway
+
+        if not gateway.rooms.can_join(room_id, agent_id, list(caller.scopes or [])):
+            raise HTTPException(status_code=403, detail="not_allowed")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    if not room_id.startswith("priv:"):
+        raise HTTPException(status_code=400, detail="can_only_manage_private_rooms")
+    _add_agent_to_room_acl(room_id, req.agent_id)
+    return {"ok": True, "room_id": room_id, "agent_id": req.agent_id.lower()}
+
+
+@router.delete("/rooms/{room_id}/members/{agent_id}")
+def remove_room_member(
+    room_id: str,
+    agent_id: str,
+    caller: AgentKey = Depends(get_current_agent),
+) -> Dict[str, Any]:
+    caller_id = caller.agent_id.lower()
+    try:
+        from .gateway import gateway
+
+        if not gateway.rooms.can_join(room_id, caller_id, list(caller.scopes or [])):
+            raise HTTPException(status_code=403, detail="not_allowed")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    if not room_id.startswith("priv:"):
+        raise HTTPException(status_code=400, detail="can_only_manage_private_rooms")
+    _remove_agent_from_room_acl(room_id, agent_id)
+    return {"ok": True, "room_id": room_id, "agent_id": agent_id.lower()}
 
 
 @router.get("/rooms")

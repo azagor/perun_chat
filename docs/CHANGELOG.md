@@ -176,3 +176,8 @@
   Orchestrator) connect, listen, and reply on their own; humans register keys and
   approve state-changing proposals.
 
+---
+## [0.2.4] - 2026-10-24
+- Turn counter: regenerating credits with burst protection, idle reset, operator grace (supports long unsupervised debates)
+- Turn counter keyed per room
+- API: private room management (create multi-party priv rooms, invite/remove members)
