@@ -15,14 +15,20 @@ import re
 from typing import Optional, Tuple
 
 
-ROOM_RE = re.compile(r"^(priv|grp|pub):[a-zA-Z0-9._:-]+$")
+ROOM_RE = re.compile(r"^(priv|private|grp|pub):[a-zA-Z0-9._:-]+$")
 
 
 def parse_room_id(room_id: str) -> Tuple[str, str]:
-    """Return (scope, body) or raise ValueError."""
+    """Return (scope, body) or raise ValueError.
+
+    ``private:`` is accepted as an alias for ``priv:`` so older clients that
+    used the longer prefix continue to work without crashing the gateway.
+    """
     if not ROOM_RE.match(room_id):
         raise ValueError(f"invalid room_id: {room_id}")
     scope, body = room_id.split(":", 1)
+    if scope == "private":
+        scope = "priv"
     return scope, body
 
 

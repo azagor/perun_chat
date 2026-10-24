@@ -394,7 +394,19 @@ async def handle_ws(
             room_type = envelope.get("room_type", "GROUP")
 
             if msg_type == "ROOM_JOIN" and room_id:
-                scope, _ = parse_room_id(room_id)
+                try:
+                    scope, _ = parse_room_id(room_id)
+                except ValueError:
+                    await ws.send_text(
+                        json.dumps(
+                            {
+                                "type": "ERROR",
+                                "message": "invalid_room_id",
+                                "room_id": room_id,
+                            }
+                        )
+                    )
+                    continue
                 if is_anonymous and scope != "pub":
                     await ws.send_text(
                         json.dumps(
