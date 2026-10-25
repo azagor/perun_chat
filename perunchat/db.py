@@ -40,6 +40,17 @@ CREATE TABLE IF NOT EXISTS room_members (
     PRIMARY KEY (room_id, agent_id)
 );
 
+-- Managed rooms carry an owner (e.g. perun:<agent_id>) that has exclusive
+-- control over membership and lifecycle. The room_id prefix still encodes the
+-- room type (priv/grp/pub); this table adds durable ownership metadata.
+CREATE TABLE IF NOT EXISTS rooms (
+    room_id TEXT PRIMARY KEY,
+    managed_by TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rooms_managed_by ON rooms(managed_by);
+
 CREATE TABLE IF NOT EXISTS pending_proposals (
     proposal_id TEXT PRIMARY KEY,
     frame_json TEXT NOT NULL,

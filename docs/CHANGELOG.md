@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0 — 2026-10-25
+
+- Managed group rooms (`grp:`) for external project bindings: new
+  `POST /api/v1/rooms/group`, `DELETE /api/v1/rooms/{room_id}`, and manager-only
+  membership endpoints, plus durable `rooms`/`managed_by` storage. This enables
+  Perun Shared Projects to lifecycle-couple dedicated PerunChat group chats.
+
 ## 0.2.9 — 2026-10-24
 
 - Public key-creation rate limits are configurable via environment variables:

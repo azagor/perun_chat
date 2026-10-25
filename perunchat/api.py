@@ -88,6 +88,12 @@ class CreatePrivateRoomRequest(BaseModel):
     room_id: str | None = None
 
 
+class CreateGroupRoomRequest(BaseModel):
+    room_id: str
+    members: List[str] = []
+    managed_by: str | None = None
+
+
 class AddRoomMemberRequest(BaseModel):
     agent_id: str
 
@@ -231,6 +237,55 @@ def _remove_agent_from_room_acl(room_id: str, agent_id: str) -> None:
         members = getattr(gateway.rooms, "_acls", {}).get(room_id)
         if members:
             members.discard(aid)
+    except Exception:
+        pass
+
+
+def _room_managed_by(room_id: str) -> str | None:
+    """Return the manager agent id for a managed room, or None."""
+    try:
+        with db_module.db(config.db_path()) as conn:
+            row = conn.execute(
+                "SELECT managed_by FROM rooms WHERE room_id = ?", (room_id,)
+            ).fetchone()
+            return row["managed_by"] if row else None
+    except Exception:
+        return None
+
+
+def _is_room_manager(caller: AgentKey, room_id: str) -> bool:
+    managed_by = _room_managed_by(room_id)
+    if not managed_by:
+        return False
+    return caller.agent_id.lower() == managed_by.lower()
+
+
+def _persist_managed_room(room_id: str, managed_by: str) -> None:
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).isoformat()
+    with db_module.db(config.db_path()) as conn:
+        conn.execute(
+            """INSERT INTO rooms (room_id, managed_by, created_at, updated_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(room_id) DO UPDATE SET
+                 managed_by=excluded.managed_by,
+                 updated_at=excluded.updated_at""",
+            (room_id, managed_by.lower(), now, now),
+        )
+        conn.commit()
+
+
+def _delete_managed_room(room_id: str) -> None:
+    """Remove a managed room and all its memberships from durable storage."""
+    with db_module.db(config.db_path()) as conn:
+        conn.execute("DELETE FROM room_members WHERE room_id = ?", (room_id,))
+        conn.execute("DELETE FROM rooms WHERE room_id = ?", (room_id,))
+        conn.commit()
+    try:
+        from .gateway import gateway
+
+        gateway.rooms._acls.pop(room_id, None)
     except Exception:
         pass
 
@@ -568,6 +623,49 @@ def create_private_room(
     return {"ok": True, "room_id": room_id, "members": sorted(list(members))}
 
 
+@router.post("/rooms/group")
+def create_group_room(
+    req: CreateGroupRoomRequest,
+    caller: AgentKey = Depends(get_current_agent),
+) -> Dict[str, Any]:
+    """Create or idempotently update a managed group room.
+
+    Managed rooms have an exclusive owner (``managed_by``) that controls
+    membership and lifecycle. They are used for project-bound chats where the
+    room's lifetime is tied to an external object (e.g. a Perun project).
+    """
+    room_id = (req.room_id or "").strip()
+    if not room_id.startswith("grp:"):
+        raise HTTPException(status_code=400, detail="group_room_must_start_with_grp:")
+
+    managed_by = (req.managed_by or caller.agent_id).strip().lower()
+    if managed_by != caller.agent_id.lower():
+        # A caller may only create rooms it owns. A scope-based admin key could
+        # relax this later, but for now ownership is explicit.
+        raise HTTPException(status_code=403, detail="cannot_create_room_for_other_owner")
+
+    existing_manager = _room_managed_by(room_id)
+    if existing_manager and existing_manager.lower() != managed_by:
+        raise HTTPException(status_code=409, detail="room_already_managed_by_another_agent")
+
+    members = set()
+    members.add(managed_by)
+    for m in req.members or []:
+        if m and m.strip():
+            members.add(m.strip().lower())
+
+    _persist_managed_room(room_id, managed_by)
+    for m in members:
+        _add_agent_to_room_acl(room_id, m)
+
+    return {
+        "ok": True,
+        "room_id": room_id,
+        "members": sorted(list(members)),
+        "managed_by": managed_by,
+    }
+
+
 @router.get("/rooms/private")
 def list_private_rooms(
     caller: AgentKey = Depends(get_current_agent),
@@ -598,7 +696,9 @@ def get_room_members(
     try:
         from .gateway import gateway
 
-        if agent_id not in gateway.rooms._acls.get(room_id, set()):
+        if _is_room_manager(caller, room_id):
+            pass
+        elif agent_id not in gateway.rooms._acls.get(room_id, set()):
             if not gateway.rooms.can_join(room_id, agent_id, list(caller.scopes or [])):
                 raise HTTPException(status_code=403, detail="not_allowed")
     except HTTPException:
@@ -623,18 +723,23 @@ def add_room_member(
     req: AddRoomMemberRequest,
     caller: AgentKey = Depends(get_current_agent),
 ) -> Dict[str, Any]:
-    agent_id = caller.agent_id.lower()
-    try:
-        from .gateway import gateway
+    caller_id = caller.agent_id.lower()
+    scope, _ = parse_room_id(room_id)
+    if scope == "grp":
+        if not _is_room_manager(caller, room_id):
+            raise HTTPException(status_code=403, detail="not_room_manager")
+    elif scope == "priv":
+        try:
+            from .gateway import gateway
 
-        if not gateway.rooms.can_join(room_id, agent_id, list(caller.scopes or [])):
-            raise HTTPException(status_code=403, detail="not_allowed")
-    except HTTPException:
-        raise
-    except Exception:
-        pass
-    if not room_id.startswith("priv:"):
-        raise HTTPException(status_code=400, detail="can_only_manage_private_rooms")
+            if not gateway.rooms.can_join(room_id, caller_id, list(caller.scopes or [])):
+                raise HTTPException(status_code=403, detail="not_allowed")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+    else:
+        raise HTTPException(status_code=400, detail="can_only_manage_private_or_group_rooms")
     _add_agent_to_room_acl(room_id, req.agent_id)
     return {"ok": True, "room_id": room_id, "agent_id": req.agent_id.lower()}
 
@@ -646,19 +751,43 @@ def remove_room_member(
     caller: AgentKey = Depends(get_current_agent),
 ) -> Dict[str, Any]:
     caller_id = caller.agent_id.lower()
-    try:
-        from .gateway import gateway
+    scope, _ = parse_room_id(room_id)
+    if scope == "grp":
+        if not _is_room_manager(caller, room_id):
+            raise HTTPException(status_code=403, detail="not_room_manager")
+    elif scope == "priv":
+        try:
+            from .gateway import gateway
 
-        if not gateway.rooms.can_join(room_id, caller_id, list(caller.scopes or [])):
-            raise HTTPException(status_code=403, detail="not_allowed")
-    except HTTPException:
-        raise
-    except Exception:
-        pass
-    if not room_id.startswith("priv:"):
-        raise HTTPException(status_code=400, detail="can_only_manage_private_rooms")
+            if not gateway.rooms.can_join(room_id, caller_id, list(caller.scopes or [])):
+                raise HTTPException(status_code=403, detail="not_allowed")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+    else:
+        raise HTTPException(status_code=400, detail="can_only_manage_private_or_group_rooms")
     _remove_agent_from_room_acl(room_id, agent_id)
     return {"ok": True, "room_id": room_id, "agent_id": agent_id.lower()}
+
+
+@router.delete("/rooms/{room_id}")
+def delete_managed_room(
+    room_id: str,
+    caller: AgentKey = Depends(get_current_agent),
+) -> Dict[str, Any]:
+    """Delete a managed room and all its memberships.
+
+    Only the manager may destroy a managed room; this enforces lifecycle
+    coupling with the owning system (e.g. a Perun shared project).
+    """
+    scope, _ = parse_room_id(room_id)
+    if scope != "grp":
+        raise HTTPException(status_code=400, detail="only_managed_group_rooms_may_be_deleted")
+    if not _is_room_manager(caller, room_id):
+        raise HTTPException(status_code=403, detail="not_room_manager")
+    _delete_managed_room(room_id)
+    return {"ok": True, "room_id": room_id, "deleted": True}
 
 
 @router.get("/rooms")
