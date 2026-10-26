@@ -40,7 +40,7 @@ from .security import SecurityPipeline
 
 
 # Per-room message history cap and max payload size for backpressure.
-_MAX_ROOM_HISTORY = 200
+_MAX_ROOM_HISTORY = 500
 _MAX_PAYLOAD_BYTES = 8192
 
 

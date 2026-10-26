@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.3 — 2026-10-26
+
+- Increased the gateway room-history replay buffer from 200 to 500 messages so
+  late-joiners and page refreshes see a longer project chat history.
+
 ## 0.3.2 — 2026-10-26
 
 - Hardened public-room membership cleanup on `ROOM_LEAVE` and websocket
