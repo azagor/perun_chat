@@ -377,3 +377,69 @@ def test_rooms_group_room_joined_flag_via_acl(tmp_path, monkeypatch) -> None:
     assert rooms[grp]["type"] == "group"
     assert rooms[grp]["joined"] is True
     assert rooms[grp]["members"] == 2
+
+
+
+def test_rooms_includes_online_members_and_count(tmp_path, monkeypatch):
+    """Active rooms report the authenticated agents currently connected."""
+    from perunchat import config as config_module
+    from perunchat import db as db_module
+    from perunchat.gateway import Room, gateway
+
+    db_file = str(tmp_path / "online.db")
+    monkeypatch.setattr(config_module, "db_path", lambda: db_file)
+    db_module.init_db(db_file)
+
+    room_id = "pub:global:online-api"
+    gateway._rooms[room_id] = Room(room_id, "PUBLIC")
+    gateway._rooms[room_id].connections["ws1"] = "alice"
+    gateway._rooms[room_id].connections["ws2"] = "bob"
+    gateway._rooms[room_id].connections["ws3"] = "anon:1.2.3.4"
+
+    headers = _auth()
+    res = client.get("/api/v1/rooms", headers=headers)
+    rooms = {r["room_id"]: r for r in res.json()["rooms"]}
+    assert rooms[room_id]["active"] is True
+    assert rooms[room_id]["online_count"] == 2
+    assert set(rooms[room_id]["online_members"]) == {"alice", "bob"}
+
+
+def test_get_room_members_requires_access() -> None:
+    """The members endpoint rejects rooms the caller cannot join."""
+    key, _ = _create(agent_id="member-check")
+    res = client.get("/api/v1/rooms/grp:other:project:room/members", headers=_owner_headers(key))
+    assert res.status_code == 403
+
+
+def test_get_room_members_returns_online_and_persisted(tmp_path, monkeypatch):
+    """The members endpoint lists live connections and durable memberships."""
+    from perunchat import config as config_module
+    from perunchat import db as db_module
+    from perunchat.gateway import Room, gateway
+    from perunchat.rooms import group_room_id
+
+    db_file = str(tmp_path / "members.db")
+    monkeypatch.setattr(config_module, "db_path", lambda: db_file)
+    db_module.init_db(db_file)
+
+    grp = group_room_id("acme", "proj", "standup")
+    with db_module.db(db_file) as conn:
+        conn.executemany(
+            "INSERT INTO room_members (room_id, agent_id, joined_at) VALUES (?, ?, ?)",
+            [
+                (grp, "rooms-agent", "2026-01-01T00:00:00+00:00"),
+                (grp, "offline-member", "2026-01-01T00:00:00+00:00"),
+            ],
+        )
+        conn.commit()
+    gateway.rooms.add_member(grp, "rooms-agent")
+    gateway.rooms.add_member(grp, "offline-member")
+    gateway._rooms[grp] = Room(grp, "GROUP")
+    gateway._rooms[grp].connections["ws1"] = "rooms-agent"
+
+    headers = _auth()
+    res = client.get(f"/api/v1/rooms/{grp}/members", headers=headers)
+    assert res.status_code == 200
+    data = res.json()
+    assert data["online"] == ["rooms-agent"]
+    assert set(data["members"]) == {"rooms-agent", "offline-member"}

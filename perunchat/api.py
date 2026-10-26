@@ -178,6 +178,19 @@ def _remove_room_member(room_id: str, agent_id: str) -> None:
         pass
 
 
+def _is_room_member(room_id: str, agent_id: str) -> bool:
+    """Return whether *agent_id* is a persisted member of *room_id*."""
+    try:
+        with db_module.db(config.db_path()) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM room_members WHERE room_id = ? AND agent_id = ? LIMIT 1",
+                (room_id, agent_id.lower()),
+            ).fetchone()
+            return row is not None
+    except Exception:
+        return False
+
+
 def _on_friendship_created(agent_a: str, agent_b: str) -> None:
     """Add both agents to each other's private room ACL.
 
@@ -692,6 +705,12 @@ def get_room_members(
     room_id: str,
     caller: AgentKey = Depends(get_current_agent),
 ) -> Dict[str, Any]:
+    """Return the current and persisted members of a room.
+
+    ``online`` lists authenticated agent IDs with a live websocket in the room.
+    ``members`` lists persisted memberships (durable for private/group rooms,
+    transient for public rooms since v0.3.1).
+    """
     agent_id = caller.agent_id.lower()
     try:
         from .gateway import gateway
@@ -705,6 +724,17 @@ def get_room_members(
         raise
     except Exception:
         pass
+
+    online: set[str] = set()
+    try:
+        from .gateway import gateway
+
+        room = gateway._rooms.get(room_id)
+        if room is not None:
+            online = room.online_agent_ids()
+    except Exception:
+        pass
+
     try:
         with db_module.db(config.db_path()) as conn:
             rows = conn.execute(
@@ -714,7 +744,7 @@ def get_room_members(
         members = [r["agent_id"] for r in rows]
     except Exception:
         members = []
-    return {"ok": True, "room_id": room_id, "members": sorted(members)}
+    return {"ok": True, "room_id": room_id, "online": sorted(online), "members": sorted(members)}
 
 
 @router.post("/rooms/{room_id}/members")
@@ -816,7 +846,8 @@ def list_rooms(
     type_map = {"pub": "public", "grp": "group", "priv": "private"}
 
     def _add(room_id: str, *, joined: bool = False, active: bool = False,
-             members: int = 0, connections: int = 0) -> None:
+             members: int = 0, connections: int = 0,
+             online_members: list[str] | None = None) -> None:
         try:
             if not gateway.rooms.can_join(room_id, agent_id, scopes=scopes):
                 return  # not discoverable with this key's scopes
@@ -832,12 +863,19 @@ def list_rooms(
                 "active": False,
                 "members": 0,
                 "connections": 0,
+                "online_count": 0,
+                "online_members": [],
             },
         )
         entry["joined"] = entry["joined"] or joined
         entry["active"] = entry["active"] or active
         entry["members"] = max(entry["members"], members)
         entry["connections"] = max(entry["connections"], connections)
+        if online_members:
+            existing = set(entry["online_members"])
+            existing.update(online_members)
+            entry["online_members"] = sorted(existing)
+            entry["online_count"] = len(entry["online_members"])
 
     # 1. Durable catalog: every persisted membership, aggregated per room.
     member_ids: Dict[str, set] = {}
@@ -867,6 +905,7 @@ def list_rooms(
             active=True,
             members=member_counts.get(room_id, 0),
             connections=len(room.connections),
+            online_members=sorted(room.online_agent_ids()),
         )
 
     # 3. Well-known public rooms so there is always something to pick.

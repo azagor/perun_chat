@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.1 — 2026-10-26
+
+- Public room memberships are now transient: joining a `pub:` room still
+  persists the membership for discovery, but an explicit `ROOM_LEAVE` or a
+  websocket disconnect removes it. This fixes public rooms appearing to contain
+  members who left long ago.
+- `GET /api/v1/rooms` now reports `online_count` and `online_members` for every
+  active room, separately from the durable `members` count.
+- `GET /api/v1/rooms/{room_id}/members` now returns both `online` (live
+  websocket presence) and `members` (persisted catalog) lists.
+
 ## 0.3.0 — 2026-10-25
 
 - Managed group rooms (`grp:`) for external project bindings: new

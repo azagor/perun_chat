@@ -609,3 +609,83 @@ def test_history_replay_preserves_original_id_and_runtime() -> None:
                 assert replay["sender"]["agent_id"] == "alice"
                 assert replay["sender"]["runtime"] == "perun"
 
+
+
+
+def test_public_room_membership_removed_on_leave(monkeypatch) -> None:
+    """Leaving a public room must remove the persisted membership."""
+    from perunchat import config as config_module
+    from perunchat import db as db_module
+
+    db_file = str(gateway.keystore.db_path)
+    monkeypatch.setattr(config_module, "db_path", lambda: db_file)
+    db_module.init_db(db_file)
+
+    raw, _ = gateway.keystore.create(
+        owner_id="owner-leave",
+        agent_id="leaver-agent",
+        supported_runtime="perun",
+        scopes=["pub:global:*"],
+    )
+    room_id = "pub:global:leave-test"
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/v1/chat/ws", headers=_headers_optional_runtime(raw, "leaver-agent", "perun")
+        ) as ws:
+            ws.send_text(
+                json.dumps({"type": "ROOM_JOIN", "room_id": room_id, "room_type": "PUBLIC"})
+            )
+            json.loads(ws.receive_text())  # ROOM_JOINED
+
+            # Membership was persisted on join.
+            assert api_module._is_room_member(room_id, "leaver-agent")
+
+            ws.send_text(
+                json.dumps({"type": "ROOM_LEAVE", "room_id": room_id, "room_type": "PUBLIC"})
+            )
+            ack = json.loads(ws.receive_text())
+            assert ack["type"] == "ROOM_LEFT"
+
+    # After leaving, the agent is no longer in the room catalog.
+    assert not api_module._is_room_member(room_id, "leaver-agent")
+
+
+def test_public_room_membership_removed_on_disconnect(monkeypatch) -> None:
+    """A dropped public-room connection must not leave the agent joined forever."""
+    from perunchat import config as config_module
+    from perunchat import db as db_module
+
+    db_file = str(gateway.keystore.db_path)
+    monkeypatch.setattr(config_module, "db_path", lambda: db_file)
+    db_module.init_db(db_file)
+
+    raw, _ = gateway.keystore.create(
+        owner_id="owner-drop",
+        agent_id="drop-agent",
+        supported_runtime="perun",
+        scopes=["pub:global:*"],
+    )
+    room_id = "pub:global:drop-test"
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/v1/chat/ws", headers=_headers_optional_runtime(raw, "drop-agent", "perun")
+        ) as ws:
+            ws.send_text(
+                json.dumps({"type": "ROOM_JOIN", "room_id": room_id, "room_type": "PUBLIC"})
+            )
+            json.loads(ws.receive_text())  # ROOM_JOINED
+            assert api_module._is_room_member(room_id, "drop-agent")
+        # websocket disconnects here
+
+    assert not api_module._is_room_member(room_id, "drop-agent")
+
+
+def test_room_online_agent_ids_excludes_anonymous() -> None:
+    """Room.online_agent_ids() returns only authenticated agents."""
+    from perunchat.gateway import Room
+
+    room = Room("pub:global:online", "PUBLIC")
+    room.connections["ws1"] = "alice"
+    room.connections["ws2"] = "bob"
+    room.connections["ws3"] = "anon:1.2.3.4"
+    assert room.online_agent_ids() == {"alice", "bob"}

@@ -64,6 +64,14 @@ class Room:
     async def leave(self, ws: WebSocket) -> None:
         self.connections.pop(ws, None)
 
+    def online_agent_ids(self) -> Set[str]:
+        """Return the set of authenticated agent IDs currently connected."""
+        ids: Set[str] = set()
+        for agent_id in self.connections.values():
+            if agent_id and not agent_id.startswith("anon:"):
+                ids.add(agent_id)
+        return ids
+
 
     async def broadcast(self, sender: WebSocket, frame: Dict[str, Any]) -> None:
         sender_agent_id = self.connections.get(sender)
@@ -462,6 +470,18 @@ async def handle_ws(
                 room = active_rooms.pop(room_id, None)
                 if room:
                     await room.leave(ws)
+                # Public room memberships are not durable: leaving means leaving.
+                # Remove the persisted catalog entry and the in-memory ACL so the
+                # agent no longer appears as a member of the channel.
+                if agent_id and room_id.startswith("pub:"):
+                    try:
+                        from .api import _remove_room_member
+                        _remove_room_member(room_id, agent_id)
+                        acls = gateway.rooms._acls.get(room_id)
+                        if acls:
+                            acls.discard(agent_id.lower())
+                    except Exception:
+                        pass
                 await ws.send_text(
                     json.dumps(
                         {
@@ -616,8 +636,20 @@ async def handle_ws(
     except WebSocketDisconnect:
         pass
     finally:
-        for room in active_rooms.values():
+        for room_id, room in active_rooms.items():
             await room.leave(ws)
+            # Clean up public room memberships on disconnect, just as on explicit
+            # ROOM_LEAVE, so a dropped connection does not leave the agent in the
+            # channel catalog forever.
+            if agent_id and room_id.startswith("pub:"):
+                try:
+                    from .api import _remove_room_member
+                    _remove_room_member(room_id, agent_id)
+                    acls = gateway.rooms._acls.get(room_id)
+                    if acls:
+                        acls.discard(agent_id.lower())
+                except Exception:
+                    pass
         if agent_id:
             became_offline = gateway.mark_offline(agent_id, ws)
             if became_offline:
