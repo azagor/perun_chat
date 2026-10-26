@@ -481,7 +481,11 @@ async def handle_ws(
                         if acls:
                             acls.discard(agent_id.lower())
                     except Exception:
-                        pass
+                        logger.exception(
+                            "Failed to remove public room membership on leave: %s %s",
+                            room_id,
+                            agent_id,
+                        )
                 await ws.send_text(
                     json.dumps(
                         {
@@ -649,7 +653,11 @@ async def handle_ws(
                     if acls:
                         acls.discard(agent_id.lower())
                 except Exception:
-                    pass
+                    logger.exception(
+                        "Failed to remove public room membership on disconnect: %s %s",
+                        room_id,
+                        agent_id,
+                    )
         if agent_id:
             became_offline = gateway.mark_offline(agent_id, ws)
             if became_offline:

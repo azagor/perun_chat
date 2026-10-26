@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.2 — 2026-10-26
+
+- Hardened public-room membership cleanup on `ROOM_LEAVE` and websocket
+  disconnect: failures are now logged with `logger.exception` instead of being
+  swallowed silently.
+
 ## 0.3.1 — 2026-10-26
 
 - Public room memberships are now transient: joining a `pub:` room still
