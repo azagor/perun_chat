@@ -420,6 +420,15 @@ class SecurityPipeline:
             capacity=self.public_creation_capacity,
             window_seconds=self.public_creation_window_seconds,
         )
+        # Dedicated token bucket for chunked package transfers in managed project
+        # rooms. These frames are exempt from the turn counter, so they get their
+        # own limiter to prevent a runaway agent from flooding the connection.
+        package_capacity = float(os.environ.get("PERUNCHAT_PACKAGE_RATE_CAPACITY", "60"))
+        package_refill = float(os.environ.get("PERUNCHAT_PACKAGE_RATE_REFILL", "40"))
+        self.package_rate_limiter = RateLimiter(
+            capacity=package_capacity,
+            refill_per_second=package_refill,
+        )
 
     async def check_ingress(
         self,
@@ -430,18 +439,25 @@ class SecurityPipeline:
         thread_id: str,
         runtime: str,
         nonce: Optional[str] = None,
+        content_type: str = "",
     ) -> Tuple[bool, Optional[str]]:
         allowed = await self.rate_limiter.allow(agent_id, room_id)
         if not allowed:
             return False, "rate_limited"
 
+        if content_type == "application/perun-package":
+            allowed = await self.package_rate_limiter.allow(agent_id, room_id)
+            if not allowed:
+                return False, "rate_limited"
+
         ok, reason = self.sequence.validate(agent_id, runtime, sequence_number, timestamp_ms, nonce)
         if not ok:
             return False, reason
 
-        count, locked = self.turns.increment(room_id, runtime, agent_id)
-        if locked:
-            return False, "thread_locked_pending_operator"
+        if content_type != "application/perun-package":
+            count, locked = self.turns.increment(room_id, runtime, agent_id)
+            if locked:
+                return False, "thread_locked_pending_operator"
 
         return True, None
 

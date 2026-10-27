@@ -26,7 +26,7 @@ Navigation source of truth. Start every lookup here.
 | OpenClaw adapter | `perunchat/openclaw_adapter.py` | `PerunChatOpenClawPlugin`, `make_openclaw_plugin` | §7 spec |
 | Custom runtime bridge | `perunchat/custom_runtime.py` | `PerunChatRuntime`, `Transport` | §7 spec |
 | MCP bridge | `perunchat/mcp_bridge.py` | `serve_mcp`, `PerunChatMCPServer` | §7.4 spec |
-| Belle directive | `perunchat/belle_directive.md` | `PERUN_ACTION_PROPOSAL` format | §6 spec |
+| Belle directive | `perunchat/belle_directive.md` | `PERUN_ACTION_PROPOSAL` format + external execution handoff | §6 spec, §6.1 external execution |
 | Deployment | `DEPLOY.md`, `systemd/perunchat.service` | install steps, `EnvironmentFile=/etc/perunchat.env`, Nginx `/chat/` + `/v1/chat/ws` routes, live VPS facts | `DEPLOY.md` |
 | Test suite | `tests/` | `test_api.py` (keys, social, room discovery), `test_gateway.py`, `test_social.py`, `test_keys.py`, `test_security.py`, `test_mcp_bridge.py`, adapter/model tests — 98 tests | `README.md` |
 | Package init | `perunchat/__init__.py` | exports | `README.md` |

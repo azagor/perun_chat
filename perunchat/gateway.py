@@ -35,13 +35,30 @@ from .api import (
 )
 from .keys import KeyStore
 from .models import ChatFrame
-from .rooms import RoomResolver, parse_room_id, private_room_id
+from .rooms import RoomResolver, parse_room_id, private_room_id, room_managed_by
 from .security import SecurityPipeline
 
 
 # Per-room message history cap and max payload size for backpressure.
 _MAX_ROOM_HISTORY = 500
 _MAX_PAYLOAD_BYTES = 8192
+# Managed project rooms accept larger package-transfer frames so external agents
+# can hand off ZIP work packages without splitting into thousands of chunks.
+_PACKAGE_MAX_PAYLOAD_BYTES = 524_288  # 512 KiB
+_PACKAGE_CONTENT_TYPE = "application/perun-package"
+_EXECUTION_CONTENT_TYPES = {
+    "application/perun-execution",
+    "application/perun-execution-result",
+    _PACKAGE_CONTENT_TYPE,
+}
+
+
+def _is_managed_project_room(room_id: str) -> bool:
+    """True only for group rooms explicitly managed in the gateway DB."""
+    scope, _ = parse_room_id(room_id)
+    if scope != "grp":
+        return False
+    return room_managed_by(room_id) is not None
 
 
 class Room:
@@ -80,7 +97,8 @@ class Room:
         # such as PRESENCE_UPDATE should not be replayed. Store a deep copy so
         # any later mutation of the broadcast frame cannot corrupt the replay
         # buffer, and preserve the original sender (including runtime) exactly.
-        if (frame.get("sender") or {}).get("agent_id"):
+        if (frame.get("sender") or {}).get("agent_id") \
+                and frame.get("content_type") != _PACKAGE_CONTENT_TYPE:
             self._history.append(copy.deepcopy(frame))
         dead: Set[WebSocket] = set()
         for conn, recipient_agent_id in list(self.connections.items()):
@@ -541,16 +559,38 @@ async def handle_ws(
             frame["sender"]["runtime"] = frame_runtime
             frame["sender"]["version"] = version
 
+            content_type = frame.get("content_type")
+            is_execution_frame = content_type in _EXECUTION_CONTENT_TYPES
+            is_managed_room = _is_managed_project_room(room_id)
+
+            # Execution/package frames are only allowed in managed project chats.
+            if is_execution_frame and not is_managed_room:
+                await ws.send_text(
+                    json.dumps(
+                        {
+                            "type": "ERROR",
+                            "message": "package_frames_project_rooms_only",
+                            "room_id": room_id,
+                        }
+                    )
+                )
+                continue
+
             # Reject oversized payloads before any further processing.
             payload = frame.get("payload")
             payload_size = len(payload.encode("utf-8")) if isinstance(payload, str) else len(json.dumps(payload).encode("utf-8"))
-            if payload_size > _MAX_PAYLOAD_BYTES:
+            size_limit = (
+                _PACKAGE_MAX_PAYLOAD_BYTES
+                if content_type == _PACKAGE_CONTENT_TYPE and is_managed_room
+                else _MAX_PAYLOAD_BYTES
+            )
+            if payload_size > size_limit:
                 await ws.send_text(
                     json.dumps(
                         {
                             "type": "ERROR",
                             "message": "payload_too_large",
-                            "max_bytes": _MAX_PAYLOAD_BYTES,
+                            "max_bytes": size_limit,
                         }
                     )
                 )
@@ -577,6 +617,7 @@ async def handle_ws(
                 thread_id=thread_id,
                 runtime=frame_runtime,
                 nonce=envelope.get("id"),
+                content_type=content_type or "",
             )
             if not ok:
                 await ws.send_text(json.dumps({"type": "ERROR", "message": reason}))
@@ -588,8 +629,12 @@ async def handle_ws(
             except Exception:
                 frame["turn_count"] = 0
 
-            # Egress DLP.
-            safe_frame = gateway.security.scan_egress(frame)
+            # Egress DLP. Package frames carry binary base64 that the entropy
+            # scanner would corrupt, so they bypass DLP inside managed rooms.
+            if content_type == _PACKAGE_CONTENT_TYPE and is_managed_room:
+                safe_frame = frame
+            else:
+                safe_frame = gateway.security.scan_egress(frame)
 
             # If this is a proposal, validate any supplied approval token and stage
             # it for the dashboard.

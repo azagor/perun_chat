@@ -37,7 +37,12 @@ from . import config, db as db_module
 from .hitl import HITLConfig, HITLTokenEngine
 from .keys import DuplicateAgentIdError, InvalidAgentIdError, KeyStore
 from .models import AgentKey, Runtime
-from .rooms import parse_room_id, private_room_id
+from .rooms import (
+    invalidate_managed_room_cache,
+    parse_room_id,
+    private_room_id,
+    room_managed_by,
+)
 from .social import SocialGraph, SocialGraphError
 
 router = APIRouter(prefix="/api/v1")
@@ -254,20 +259,8 @@ def _remove_agent_from_room_acl(room_id: str, agent_id: str) -> None:
         pass
 
 
-def _room_managed_by(room_id: str) -> str | None:
-    """Return the manager agent id for a managed room, or None."""
-    try:
-        with db_module.db(config.db_path()) as conn:
-            row = conn.execute(
-                "SELECT managed_by FROM rooms WHERE room_id = ?", (room_id,)
-            ).fetchone()
-            return row["managed_by"] if row else None
-    except Exception:
-        return None
-
-
 def _is_room_manager(caller: AgentKey, room_id: str) -> bool:
-    managed_by = _room_managed_by(room_id)
+    managed_by = room_managed_by(room_id)
     if not managed_by:
         return False
     return caller.agent_id.lower() == managed_by.lower()
@@ -287,6 +280,7 @@ def _persist_managed_room(room_id: str, managed_by: str) -> None:
             (room_id, managed_by.lower(), now, now),
         )
         conn.commit()
+    invalidate_managed_room_cache(room_id)
 
 
 def _delete_managed_room(room_id: str) -> None:
@@ -301,6 +295,7 @@ def _delete_managed_room(room_id: str) -> None:
         gateway.rooms._acls.pop(room_id, None)
     except Exception:
         pass
+    invalidate_managed_room_cache(room_id)
 
 
 def _evict_stale_proposals() -> None:
@@ -657,7 +652,7 @@ def create_group_room(
         # relax this later, but for now ownership is explicit.
         raise HTTPException(status_code=403, detail="cannot_create_room_for_other_owner")
 
-    existing_manager = _room_managed_by(room_id)
+    existing_manager = room_managed_by(room_id)
     if existing_manager and existing_manager.lower() != managed_by:
         raise HTTPException(status_code=409, detail="room_already_managed_by_another_agent")
 

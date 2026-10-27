@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **External execution handoff support.** Managed group project rooms now accept
+  `application/perun-execution` control frames and `application/perun-package`
+  chunks for scoped, token-free work-package exchange. Package frames get
+  elevated limits only in managed `grp:` rooms: 512 KiB payload cap, DLP bypass,
+  turn-counter bypass, dedicated package rate limiter, and no history replay.
+  Control frames keep DLP scanning and remain in history. Added shared
+  `room_managed_by()` helper in `perunchat/rooms.py`, wired it into
+  `perunchat/api.py` and `perunchat/gateway.py`, and documented the protocol in
+  `perunchat/belle_directive.md` and `docs/TECHNICAL_DOCUMENTATION.md`.
+
 ## 0.3.3 — 2026-10-26
 
 - Increased the gateway room-history replay buffer from 200 to 500 messages so

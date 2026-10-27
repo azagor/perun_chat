@@ -689,3 +689,191 @@ def test_room_online_agent_ids_excludes_anonymous() -> None:
     room.connections["ws2"] = "bob"
     room.connections["ws3"] = "anon:1.2.3.4"
     assert room.online_agent_ids() == {"alice", "bob"}
+
+
+# --------------------------------------------------------------------------- #
+# External execution handoff: scoped frame acceptance in managed group rooms.
+# --------------------------------------------------------------------------- #
+def _create_managed_room(room_id: str, managed_by: str, monkeypatch) -> str:
+    """Create an API key and a managed group room; return the plaintext key."""
+    from perunchat import config as config_module
+    from perunchat import db as db_module
+
+    db_file = str(gateway.keystore.db_path)
+    monkeypatch.setattr(config_module, "db_path", lambda: db_file)
+    db_module.init_db(db_file)
+    raw, _ = gateway.keystore.create(
+        owner_id="owner-exec",
+        agent_id=managed_by,
+        supported_runtime="perun",
+        scopes=["grp:test:*"],
+    )
+    client = TestClient(app)
+    r = client.post(
+        "/api/v1/rooms/group",
+        json={"room_id": room_id, "members": []},
+        headers={"Authorization": f"Bearer {raw}"},
+    )
+    assert r.status_code == 200, r.text
+    return raw
+
+
+def _execution_frame(room_id: str, seq: int, payload: dict) -> dict:
+    import time
+    return {
+        "id": f"exec_{seq}",
+        "trace_id": "trc_exec",
+        "thread_id": "default",
+        "sequence_number": seq,
+        "timestamp": int(time.time() * 1000),
+        "room_type": "GROUP",
+        "room_id": room_id,
+        "sender": {"agent_id": "manager", "runtime": "perun"},
+        "content_type": "application/perun-execution",
+        "turn_count": 0,
+        "payload": payload,
+    }
+
+
+def _package_frame(room_id: str, seq: int, transfer_id: str, data: str) -> dict:
+    import time
+    return {
+        "id": f"pkg_{seq}",
+        "trace_id": "trc_pkg",
+        "thread_id": "default",
+        "sequence_number": seq + 100,
+        "timestamp": int(time.time() * 1000),
+        "room_type": "GROUP",
+        "room_id": room_id,
+        "sender": {"agent_id": "manager", "runtime": "perun"},
+        "content_type": "application/perun-package",
+        "turn_count": 0,
+        "payload": {"transfer_id": transfer_id, "seq": seq, "total_chunks": 1, "data": data},
+    }
+
+
+def test_execution_frames_rejected_in_public_room() -> None:
+    """Execution frames are only accepted in managed group rooms."""
+    raw, _ = gateway.keystore.create(
+        owner_id="owner-pub",
+        agent_id="pub-agent",
+        supported_runtime="perun",
+        scopes=["pub:global:*"],
+    )
+    room_id = "pub:global:exec-reject"
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/v1/chat/ws", headers=_headers_optional_runtime(raw, "pub-agent", "perun")
+        ) as ws:
+            ws.send_text(
+                json.dumps({"type": "ROOM_JOIN", "room_id": room_id, "room_type": "PUBLIC"})
+            )
+            json.loads(ws.receive_text())  # ROOM_JOINED
+
+            ws.send_text(json.dumps(_execution_frame(room_id, 1, {"op": "execution_status"})))
+            err = json.loads(ws.receive_text())
+            assert err["type"] == "ERROR"
+            assert err["message"] == "package_frames_project_rooms_only"
+
+
+def test_package_frames_rejected_in_unmanaged_group_room() -> None:
+    """A plain grp: room without a managed_by row rejects package frames."""
+    raw, _ = gateway.keystore.create(
+        owner_id="owner-grp",
+        agent_id="grp-agent",
+        supported_runtime="perun",
+        scopes=["grp:test:*"],
+    )
+    room_id = "grp:test:unmanaged:room"
+    gateway.rooms.add_member(room_id, "grp-agent")
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/v1/chat/ws", headers=_headers_optional_runtime(raw, "grp-agent", "perun")
+        ) as ws:
+            ws.send_text(
+                json.dumps({"type": "ROOM_JOIN", "room_id": room_id, "room_type": "GROUP"})
+            )
+            json.loads(ws.receive_text())  # ROOM_JOINED
+
+            ws.send_text(json.dumps(_package_frame(room_id, 0, "trf_1", "Zg==")))
+            err = json.loads(ws.receive_text())
+            assert err["type"] == "ERROR"
+            assert err["message"] == "package_frames_project_rooms_only"
+
+
+def test_room_managed_by_uses_short_lived_cache(tmp_path, monkeypatch) -> None:
+    """room_managed_by caches the result and is invalidated by lifecycle helpers."""
+    from perunchat import config as config_module
+    from perunchat import db as db_module
+    from perunchat.rooms import (
+        group_room_id,
+        invalidate_managed_room_cache,
+        room_managed_by,
+    )
+
+    db_file = str(tmp_path / "rooms.db")
+    monkeypatch.setattr(config_module, "db_path", lambda: db_file)
+    db_module.init_db(db_file)
+    room_id = group_room_id("acme", "proj", "cache")
+
+    # No row -> None, and the cache stores the miss.
+    assert room_managed_by(room_id) is None
+    assert room_managed_by(room_id) is None
+
+    # Create the room and invalidate the cache.
+    with db_module.db(db_file) as conn:
+        conn.execute(
+            "INSERT INTO rooms (room_id, managed_by, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            (room_id, "manager-bot", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+        )
+        conn.commit()
+    # Without invalidation the stale cached None is returned.
+    assert room_managed_by(room_id) is None
+    invalidate_managed_room_cache(room_id)
+    assert room_managed_by(room_id) == "manager-bot"
+
+
+def test_package_frames_accepted_in_managed_group_room(monkeypatch) -> None:
+    """Managed group rooms allow larger package payloads and skip DLP/turn counters."""
+    room_id = "grp:test:managed:room"
+    key = _create_managed_room(room_id, "manager", monkeypatch)
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/v1/chat/ws", headers=_headers_optional_runtime(key, "manager", "perun")
+        ) as ws:
+            ws.send_text(
+                json.dumps({"type": "ROOM_JOIN", "room_id": room_id, "room_type": "GROUP"})
+            )
+            json.loads(ws.receive_text())  # ROOM_JOINED
+
+            # A control frame is echoed normally (DLP still applies).
+            ws.send_text(
+                json.dumps(_execution_frame(room_id, 1, {"op": "execution_status", "proposal_id": "p"}))
+            )
+            echo = json.loads(ws.receive_text())
+            assert echo["content_type"] == "application/perun-execution"
+
+            # A package frame is accepted even though it is > normal 8 KiB limit.
+            big_data = "a" * (10 * 1024)
+            ws.send_text(json.dumps(_package_frame(room_id, 2, "trf_2", big_data)))
+            echo = json.loads(ws.receive_text())
+            assert echo["content_type"] == "application/perun-package"
+            assert echo["payload"]["data"] == big_data
+
+            # Package frames bypass DLP; execution frames are still scanned.
+            secret = "prn_live_abcdef1234567890secretvalue"
+            ws.send_text(
+                json.dumps(_execution_frame(room_id, 103, {"op": "note", "text": secret}))
+            )
+            echo = json.loads(ws.receive_text())
+            assert echo["content_type"] == "application/perun-execution"
+            assert "[REDACTED_SECRET]" in echo["payload"]["text"]
+            assert secret not in echo["payload"]["text"]
+
+            ws.send_text(json.dumps(_package_frame(room_id, 104, "trf_3", secret)))
+            echo = json.loads(ws.receive_text())
+            assert echo["content_type"] == "application/perun-package"
+            assert echo["payload"]["data"] == secret
+
+            # Package frames are not stored in history.
+            assert not any(f.get("content_type") == "application/perun-package" for f in gateway._rooms[room_id]._history)

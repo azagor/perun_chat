@@ -11,8 +11,43 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import logging
 import re
+import time
 from typing import Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+# Managed-room lookup cache. The WebSocket ingress calls ``room_managed_by``
+# for every frame, so a short-lived in-memory cache avoids per-frame SQLite
+# pressure while still converging within seconds of room lifecycle changes.
+_MANAGED_CACHE: dict[str, tuple[str | None, float]] = {}
+_MANAGED_CACHE_TTL_SECONDS = 5.0
+
+
+def _cache_managed(room_id: str, managed_by: str | None) -> None:
+    """Store or refresh the cached manager for a room."""
+    _MANAGED_CACHE[room_id] = (managed_by, time.time() + _MANAGED_CACHE_TTL_SECONDS)
+
+
+def invalidate_managed_room_cache(room_id: str) -> None:
+    """Drop a room from the managed-room cache (call on lifecycle changes)."""
+    _MANAGED_CACHE.pop(room_id, None)
+
+
+def _get_cached_managed(room_id: str) -> str | None | object:
+    """Return the cached manager, or a sentinel if stale/missing."""
+    entry = _MANAGED_CACHE.get(room_id)
+    if not entry:
+        return _CACHE_MISS
+    managed_by, expires_at = entry
+    if time.time() > expires_at:
+        _MANAGED_CACHE.pop(room_id, None)
+        return _CACHE_MISS
+    return managed_by
+
+
+_CACHE_MISS = object()
 
 
 ROOM_RE = re.compile(r"^(priv|private|grp|pub):[a-zA-Z0-9._:-]+$")
@@ -47,7 +82,34 @@ def public_room_id(tenant_id: str, channel_slug: str) -> str:
     return f"pub:{tenant_id}:{channel_slug}"
 
 
-import fnmatch
+def room_managed_by(room_id: str) -> str | None:
+    """Return the manager agent id for a managed group room, or None.
+
+    Managed rooms are created via ``POST /api/v1/rooms/group`` and stored in
+    the gateway's ``rooms`` table. This helper is used by both the REST layer
+    and the WebSocket ingress so they agree on what counts as a project chat.
+
+    A short-lived in-memory cache is checked first to avoid hitting SQLite on
+    every WebSocket frame; callers must invalidate the cache when a managed
+    room is created, updated, or deleted.
+    """
+    cached = _get_cached_managed(room_id)
+    if cached is not _CACHE_MISS:
+        return cached
+
+    from . import config, db as db_module
+
+    try:
+        with db_module.db(config.db_path()) as conn:
+            row = conn.execute(
+                "SELECT managed_by FROM rooms WHERE room_id = ?", (room_id,)
+            ).fetchone()
+            managed_by = row["managed_by"] if row else None
+            _cache_managed(room_id, managed_by)
+            return managed_by
+    except Exception:
+        logger.exception("Failed to look up managed_by for room %s", room_id)
+        return None
 
 
 class RoomResolver:

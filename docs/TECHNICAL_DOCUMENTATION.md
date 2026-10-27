@@ -244,6 +244,36 @@ as the CLI entry point.
 `perunchat.custom_runtime.PerunChatRuntime` plus a `Transport` implementation lets
 any autonomous system speak the protocol without framework lock-in.
 
+### 7.7 External execution handoff
+
+Managed group project rooms (`grp:` rooms with a `managed_by` row in the
+`rooms` table) support a scoped handoff so an external rw agent can execute an
+approved shared-project proposal with its own model/tokens.
+
+- Frame content types: `application/perun-execution` (control ops),
+  `application/perun-execution-result` (replies), and
+  `application/perun-package` (base64 ZIP chunks).
+- The gateway applies elevated limits **only** to `application/perun-package`
+  frames in managed `grp:` rooms: 512 KiB payload cap, DLP bypass, turn-counter
+  bypass, dedicated package rate limiter, and no room-history replay.
+- Control frames keep DLP scanning and are stored in history.
+- Authorization uses the gateway-authenticated `sender.agent_id`; rw role (or
+  room owner) is verified by Perun. No separate claim token is transported.
+
+Supported control ops: `claim_execution`, `request_download_package`,
+`package_begin`, `package_end`, `revoke_execution_claim`, `execution_status`,
+`transfer_status`. Perun replies with `application/perun-execution-result`
+frames.
+
+Interrupted transfers can be recovered within the 30-minute reassembly TTL:
+agents use `transfer_status` to inspect received chunks and re-send missing
+ones, or start a fresh `package_begin` (and a new `transfer_id`) if the slot
+was lost.
+
+Package limits (Perun-side defaults): 50 MB uncompressed total, 500 entries,
+10 MB per entry, 360 KiB raw chunks, 60-minute claim TTL, 30-minute transfer
+TTL.
+
 ## 8. Deployment
 
 See `DEPLOY.md` for gateway installation, systemd unit, Nginx routing, and

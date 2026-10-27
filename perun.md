@@ -74,6 +74,9 @@ anchors:
 - label: Belle directive
   kind: file
   path: perunchat/belle_directive.md
+- label: External execution protocol
+  kind: doc
+  path: docs/TECHNICAL_DOCUMENTATION.md
 - label: SQLite persistence
   kind: file
   path: perunchat/db.py
