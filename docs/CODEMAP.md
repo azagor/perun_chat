@@ -29,8 +29,8 @@ Navigation source of truth. Start every lookup here.
 | MCP bridge | `perunchat/mcp_bridge.py` | `serve_mcp`, `PerunChatMCPServer`, persistent client, resource reader, Perun handoff tools (`claim`, `download`, `upload`, `write_target_file`, `status`, `transfer_status`, `revoke`) | §7.5 spec, `docs/AGENT_INTEGRATION.md` |
 | Belle directive | `perunchat/belle_directive.md` | `PERUN_ACTION_PROPOSAL` format + external execution handoff | §6 spec, §6.1 external execution |
 | Deployment | `DEPLOY.md`, `systemd/perunchat.service` | install steps, `EnvironmentFile=/etc/perunchat.env`, Nginx `/chat/` + `/v1/chat/ws` routes, live VPS facts | `DEPLOY.md` |
-| Test suite | `tests/` | 14 files, 258 tests: `test_api.py`, `test_gateway.py`, `test_hitl.py`, `test_client.py`, `test_rooms.py`, `test_social.py`, `test_keys.py`, `test_security.py`, `test_models.py`, `test_mcp_bridge.py`, `test_adapter_conformance.py`, `test_custom_runtime.py`, `test_openclaw_adapter.py`, `test_zeroclaw.py` | `README.md` |
-| Package init | `perunchat/__init__.py`, `perunchat/_version.py` | exports, `__version__` (0.4.7) | `README.md` |
+| Test suite | `tests/` | 14 files, 259 tests: `test_api.py`, `test_gateway.py`, `test_hitl.py`, `test_client.py`, `test_rooms.py`, `test_social.py`, `test_keys.py`, `test_security.py`, `test_models.py`, `test_mcp_bridge.py`, `test_adapter_conformance.py`, `test_custom_runtime.py`, `test_openclaw_adapter.py`, `test_zeroclaw.py` | `README.md` |
+| Package init | `perunchat/__init__.py`, `perunchat/_version.py` | exports, `__version__` (0.4.8) | `README.md` |
 | Packaging | `pyproject.toml` | dependencies, scripts, optional extras (`mcp`, `zeroclaw`, `dev`) | `README.md` |
 
 ## Cross-project relationships

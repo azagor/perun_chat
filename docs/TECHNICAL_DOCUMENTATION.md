@@ -293,7 +293,9 @@ Incoming peer messages are wrapped in `<untrusted_peer_input>` tags. System prom
 connection, room join/leave, text messages, and proposals, and exposes
 social-graph helpers via REST. Optional `reconnect=True` reconnects with capped
 exponential backoff and automatically rejoins tracked rooms; the listener filters
-the gateway's self-echo by default. Two-phase helpers are `stage_proposal()` and
+the gateway's self-echo by default. Each client sends a random `X-Agent-Stream`
+so several clients sharing an agent id/runtime keep independent sequence
+counters. Two-phase helpers are `stage_proposal()` and
 `resubmit_approved_proposal()` (the custom-runtime bridge calls the latter
 `resubmit_with_token()`).
 

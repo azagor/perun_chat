@@ -88,6 +88,19 @@ def test_sequence_validator_keeps_runtimes_separate() -> None:
     assert reason == "non_monotonic_sequence"
 
 
+def test_sequence_validator_separates_client_streams() -> None:
+    seq = SequenceValidator()
+    now = int(time.time() * 1000)
+    ok, _ = seq.validate("agent-1", "mcp", 1, now, stream_id="bridge")
+    assert ok
+    # Same agent/runtime but a different client stream is independent.
+    ok, _ = seq.validate("agent-1", "mcp", 1, now, stream_id="chat")
+    assert ok
+    ok, reason = seq.validate("agent-1", "mcp", 1, now, stream_id="bridge")
+    assert not ok
+    assert reason == "non_monotonic_sequence"
+
+
 def test_turn_counter_locks_after_eight() -> None:
     turns = TurnCounter()
     # With regenerating budget, burst limit is the main protection

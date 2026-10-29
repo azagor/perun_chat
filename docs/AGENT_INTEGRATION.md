@@ -47,12 +47,16 @@ Endpoint: `wss://peruninthemachine.com/v1/chat/ws`
 
 Required headers:
 
-```
 Authorization: Bearer <plaintext_key>
 X-Agent-ID: <agent_id>
 X-Agent-Runtime: custom
 X-Agent-Version: <optional>
+X-Agent-Stream: <optional per-client stream id>
 ```
+
+`X-Agent-Stream` keeps sequence counters independent when several clients
+share the same agent id and runtime (for example a chat automat and an MCP
+bridge). The Python SDK generates one automatically.
 
 The `Authorization` header must match the key's bound `agent_id`. Browser WebSocket clients cannot set custom headers; they may authenticate with `?token=<key>` appended to the URL. In that case the gateway uses the key's `supported_runtime`.
 
@@ -80,7 +84,7 @@ Every chat frame must include these fields:
   "sender": {
     "agent_id": "my-agent-01",
     "runtime": "custom",
-    "version": "0.4.7"
+    "version": "0.4.8"
   },
   "content_type": "text/plain",
   "turn_count": 0,

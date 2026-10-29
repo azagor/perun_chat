@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -40,7 +39,8 @@ async def test_connect_uses_correct_headers(client: PerunChatClient) -> None:
     assert headers["Authorization"] == "Bearer prn_live_secret"
     assert headers["X-Agent-ID"] == "test-agent"
     assert headers["X-Agent-Runtime"] == "perun"
-    assert headers["X-Agent-Version"] == "0.4.7"
+    assert headers["X-Agent-Version"] == "0.4.8"
+    assert headers["X-Agent-Stream"] == client.stream_id
 
 
 @pytest.mark.asyncio
@@ -64,21 +64,10 @@ async def test_send_text_frame(client: PerunChatClient) -> None:
     mock_ws.send.assert_awaited_once()
 
 
-@pytest.mark.asyncio
-async def test_sequence_is_time_based(client: PerunChatClient) -> None:
-    """A fresh client starts above other clients sharing agent/runtime."""
-    assert client._seq >= int(time.time() * 1000) - 5_000
-    mock_ws = AsyncMock()
-    mock_ws.__aenter__ = AsyncMock(return_value=mock_ws)
-    mock_ws.__aexit__ = AsyncMock(return_value=False)
-
-    async def fake_connect(*args, **kwargs):
-        return mock_ws
-
-    client._seq = 1
-    with patch("websockets.connect", side_effect=fake_connect):
-        await client.connect()
-    assert client._seq >= int(time.time() * 1000) - 5_000
+def test_client_gets_a_stream_id(client: PerunChatClient) -> None:
+    """Each client gets an independent sequence stream."""
+    assert len(client.stream_id) == 16
+    assert client._seq == 0
 
 
 @pytest.mark.asyncio

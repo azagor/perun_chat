@@ -174,11 +174,12 @@ class SequenceValidator:
         sequence_number: int,
         timestamp_ms: int,
         nonce: Optional[str] = None,
+        stream_id: str = "",
     ) -> Tuple[bool, Optional[str]]:
         # Different clients (e.g. the autonomous bridge vs. the browser dashboard)
-        # may share an agent_id/API key but use distinct runtimes. Keep their
-        # sequence streams separate so one client cannot invalidate the other.
-        key = f"{agent_id}:{runtime}"
+        # may share an agent_id/API key and runtime. A per-client stream id keeps
+        # their sequence counters separate.
+        key = f"{agent_id}:{runtime}:{stream_id}"
         last = self._last_seq.get(key, -1)
         if sequence_number <= last:
             return False, "non_monotonic_sequence"
@@ -440,6 +441,7 @@ class SecurityPipeline:
         runtime: str,
         nonce: Optional[str] = None,
         content_type: str = "",
+        stream_id: str = "",
     ) -> Tuple[bool, Optional[str]]:
         """Rate, sequence and timestamp checks before proposal/broadcast decisions.
 
@@ -455,7 +457,14 @@ class SecurityPipeline:
             if not allowed:
                 return False, "rate_limited"
 
-        ok, reason = self.sequence.validate(agent_id, runtime, sequence_number, timestamp_ms, nonce)
+        ok, reason = self.sequence.validate(
+            agent_id,
+            runtime,
+            sequence_number,
+            timestamp_ms,
+            nonce,
+            stream_id=stream_id,
+        )
         if not ok:
             return False, reason
 
@@ -491,6 +500,7 @@ class SecurityPipeline:
         runtime: str,
         nonce: Optional[str] = None,
         content_type: str = "",
+        stream_id: str = "",
     ) -> Tuple[bool, Optional[str]]:
         ok, reason = await self.pre_validate(
             agent_id=agent_id,
@@ -501,6 +511,7 @@ class SecurityPipeline:
             runtime=runtime,
             nonce=nonce,
             content_type=content_type,
+            stream_id=stream_id,
         )
         if not ok:
             return False, reason

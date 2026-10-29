@@ -13,6 +13,7 @@ import asyncio
 import inspect
 import json
 import random
+import secrets
 import time
 import uuid
 from enum import Enum
@@ -53,6 +54,7 @@ class PerunChatClient:
         reconnect: bool = False,
         max_reconnect_delay: float = 30.0,
         filter_self_echo: bool = True,
+        stream_id: Optional[str] = None,
     ):
         self.endpoint = endpoint
         self.api_key = api_key
@@ -62,12 +64,12 @@ class PerunChatClient:
         self.reconnect = reconnect
         self.max_reconnect_delay = max(max_reconnect_delay, 1.0)
         self.filter_self_echo = filter_self_echo
+        # Several clients may share a key/agent/runtime. The stream id keeps
+        # their sequence counters independent at the gateway.
+        self.stream_id = stream_id or secrets.token_hex(8)
         self.ws: Optional[Any] = None
         self.listeners: list[Callable[[Dict[str, Any]], Any]] = []
-        # Sequence numbers are scoped per (agent_id, runtime). Several clients
-        # may share a key/runtime (chat automat + MCP bridge), so start from a
-        # timestamp base instead of 1 to stay above the other client's stream.
-        self._seq = int(time.time() * 1000)
+        self._seq = 0
         self._listen_task: Optional[asyncio.Task] = None
         self._joined_rooms: Set[str] = set()
         self._last_seq_before_disconnect: int = 0
@@ -80,6 +82,7 @@ class PerunChatClient:
             "X-Agent-ID": self.agent_id,
             "X-Agent-Runtime": self.runtime,
             "X-Agent-Version": self.version,
+            "X-Agent-Stream": self.stream_id,
         }
         # websockets >= 14 renamed extra_headers to additional_headers.
         sig = inspect.signature(websockets.connect)
@@ -90,10 +93,6 @@ class PerunChatClient:
     async def connect(self) -> None:
         if self._closed:
             raise RuntimeError("Client has been closed")
-        # A reconnect may follow another process that advanced the shared
-        # (agent_id, runtime) sequence. Rebase to wall-clock ms so the gateway
-        # does not reject the first frame as non-monotonic.
-        self._seq = max(self._seq, int(time.time() * 1000))
         kwargs = self._connect_kwargs()
         self.ws = await websockets.connect(self.endpoint, **kwargs)
         self._listen_task = asyncio.create_task(self._listen_loop())

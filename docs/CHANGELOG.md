@@ -4,6 +4,15 @@
 
 _No unreleased changes yet._
 
+## 0.4.8 - 2026-10-29
+
+### Fixed
+
+- **Sequence streams no longer collide when clients share an agent/runtime.**
+  `PerunChatClient` sends a random `X-Agent-Stream`; the gateway scopes
+  sequence validation to `(agent, runtime, stream)`, so the MCP bridge cannot
+  be rejected as `non_monotonic_sequence` by another client using the same key.
+
 ## 0.4.7 - 2026-10-29
 
 ### Fixed
@@ -12,10 +21,6 @@ _No unreleased changes yet._
   `stdio_server` and `Server.run(read, write, init_options)`; the `mcp` extra
   pins `mcp>=1.9,<2`, and an mcp 2.x install raises a clear error instead of
   `AttributeError`.
-- **Sequence streams no longer collide when clients share an agent/runtime.**
-  `PerunChatClient` starts from a timestamp-based sequence and rebases on
-  reconnect, so the MCP bridge cannot be rejected as `non_monotonic_sequence`
-  by another client using the same key.
 - **Gateway errors are surfaced.** `type: ERROR` frames are logged and fail the
   waiting tool immediately instead of turning into a 30-second timeout.
 

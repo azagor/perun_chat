@@ -417,6 +417,7 @@ async def handle_ws(
     x_agent_id: str = Header(default="", alias="X-Agent-ID"),
     x_agent_runtime: str = Header(default="custom", alias="X-Agent-Runtime"),
     x_agent_version: str = Header(default="0.0.0", alias="X-Agent-Version"),
+    x_agent_stream: str = Header(default="", alias="X-Agent-Stream"),
 ):
     remote_addr = ws.client.host if ws.client else "unknown"
 
@@ -825,6 +826,7 @@ async def handle_ws(
                 runtime=frame_runtime,
                 nonce=envelope.get("id"),
                 content_type=content_type or "",
+                stream_id=x_agent_stream,
             )
             if not ok:
                 await ws.send_text(json.dumps({"type": "ERROR", "message": reason}))
