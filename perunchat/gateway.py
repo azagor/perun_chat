@@ -703,7 +703,7 @@ async def handle_ws(
                 recipient_id = str(frame.get("recipient_id") or "").strip()
                 payload_obj = frame.get("payload") or {}
                 if content_type == _EXECUTION_RESULT_CONTENT_TYPE:
-                    if not owner_id or agent_id != owner_id:
+                    if not owner_id or agent_id.lower() != owner_id.lower():
                         await ws.send_text(
                             json.dumps(
                                 {
@@ -727,7 +727,7 @@ async def handle_ws(
                         continue
                 elif content_type == _EXECUTION_CONTENT_TYPE:
                     if payload_obj.get("op") == "package_ready":
-                        if not owner_id or agent_id != owner_id:
+                        if not owner_id or agent_id.lower() != owner_id.lower():
                             await ws.send_text(
                                 json.dumps(
                                     {
@@ -761,7 +761,11 @@ async def handle_ws(
                             )
                         )
                         continue
-                    if owner_id and agent_id != owner_id and recipient_id != owner_id:
+                    if (
+                        owner_id
+                        and agent_id.lower() != owner_id.lower()
+                        and recipient_id.lower() != owner_id.lower()
+                    ):
                         await ws.send_text(
                             json.dumps(
                                 {

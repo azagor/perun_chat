@@ -4,6 +4,13 @@
 
 _No unreleased changes yet._
 
+## 0.4.4 - 2026-10-29
+
+### Fixed
+
+- Managed-room owner routing is case-insensitive and tracked per room, so
+  mixed-case agent ids and multi-room sessions direct handoff frames correctly.
+
 ## 0.4.3 - 2026-10-29
 
 ### Added

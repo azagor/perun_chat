@@ -69,6 +69,7 @@ def _push_control(
         {
             "content_type": content_type,
             "payload": payload,
+            "room_id": "grp:perun:demo:chat",
             "sender": {"agent_id": "peruntheoverseer", "runtime": "perun"},
         }
     )
@@ -97,7 +98,7 @@ async def test_claim_execution_waits_for_result(server: PerunChatMCPServer) -> N
     )
     assert result["isError"] is False
     assert '"status": "claimed"' in result["content"][0]["text"]
-    assert server._perun_agent_id == "peruntheoverseer"
+    assert server._perun_agent_ids["grp:perun:demo:chat"] == "peruntheoverseer"
 
 
 @pytest.mark.asyncio
@@ -187,7 +188,7 @@ async def test_upload_package_sends_begin_chunks_end(
         return {}
 
     _install_client(server, send)
-    server._perun_agent_id = "peruntheoverseer"
+    server._perun_agent_ids["grp:perun:demo:chat"] = "peruntheoverseer"
     result = await server.call_tool(
         "perunchat_upload_package",
         {

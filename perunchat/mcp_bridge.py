@@ -68,7 +68,7 @@ class PerunChatMCPServer:
         self._client: Any = None
         self._RoomType: Any = None
         self._RiskTier: Any = None
-        self._perun_agent_id = ""
+        self._perun_agent_ids: Dict[str, str] = {}
         self._download_lock = asyncio.Lock()
         self._room_messages: Dict[str, List[Dict[str, Any]]] = {}
         # Control/result frames and package chunks are kept separately so the
@@ -127,7 +127,9 @@ class PerunChatMCPServer:
                 or payload.get("op") == "package_ready"
             ):
                 # The gateway only permits these from the managed-room owner.
-                self._perun_agent_id = sender_id
+                room_key = str(frame.get("room_id") or "").strip()
+                if room_key:
+                    self._perun_agent_ids[room_key] = sender_id
             if (
                 content_type == self._EXECUTION_CONTENT_TYPE
                 and payload.get("op") == "package_ready"
@@ -240,7 +242,7 @@ class PerunChatMCPServer:
             room_type,
             self._EXECUTION_CONTENT_TYPE,
             payload,
-            recipient_id=self._perun_agent_id or None,
+            recipient_id=self._perun_agent_ids.get(room_id) or None,
         )
 
     async def _wait_for_frame(
@@ -358,7 +360,7 @@ class PerunChatMCPServer:
                 "total_size": total_size,
                 "total_chunks": total_chunks,
             },
-            recipient_id=self._perun_agent_id or None,
+            recipient_id=self._perun_agent_ids.get(room_id) or None,
         )
         _ = begin
         begin_result = await self._wait_for_result(
@@ -385,7 +387,7 @@ class PerunChatMCPServer:
                     "total_chunks": total_chunks,
                     "data": base64.b64encode(chunk).decode("ascii"),
                 },
-                recipient_id=self._perun_agent_id or None,
+                recipient_id=self._perun_agent_ids.get(room_id) or None,
             )
             if self._CHUNK_SEND_DELAY:
                 await asyncio.sleep(self._CHUNK_SEND_DELAY)
@@ -396,7 +398,7 @@ class PerunChatMCPServer:
             room_type,
             self._EXECUTION_CONTENT_TYPE,
             {"op": "package_end", "transfer_id": transfer_id},
-            recipient_id=self._perun_agent_id or None,
+            recipient_id=self._perun_agent_ids.get(room_id) or None,
         )
 
         def matches(frame: Dict[str, Any]) -> bool:

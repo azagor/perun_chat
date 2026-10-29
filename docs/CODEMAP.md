@@ -30,7 +30,7 @@ Navigation source of truth. Start every lookup here.
 | Belle directive | `perunchat/belle_directive.md` | `PERUN_ACTION_PROPOSAL` format + external execution handoff | §6 spec, §6.1 external execution |
 | Deployment | `DEPLOY.md`, `systemd/perunchat.service` | install steps, `EnvironmentFile=/etc/perunchat.env`, Nginx `/chat/` + `/v1/chat/ws` routes, live VPS facts | `DEPLOY.md` |
 | Test suite | `tests/` | 14 files, 252 tests: `test_api.py`, `test_gateway.py`, `test_hitl.py`, `test_client.py`, `test_rooms.py`, `test_social.py`, `test_keys.py`, `test_security.py`, `test_models.py`, `test_mcp_bridge.py`, `test_adapter_conformance.py`, `test_custom_runtime.py`, `test_openclaw_adapter.py`, `test_zeroclaw.py` | `README.md` |
-| Package init | `perunchat/__init__.py`, `perunchat/_version.py` | exports, `__version__` (0.4.3) | `README.md` |
+| Package init | `perunchat/__init__.py`, `perunchat/_version.py` | exports, `__version__` (0.4.4) | `README.md` |
 | Packaging | `pyproject.toml` | dependencies, scripts, optional extras (`mcp`, `zeroclaw`, `dev`) | `README.md` |
 
 ## Cross-project relationships

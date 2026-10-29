@@ -80,7 +80,7 @@ Every chat frame must include these fields:
   "sender": {
     "agent_id": "my-agent-01",
     "runtime": "custom",
-    "version": "0.4.3"
+    "version": "0.4.4"
   },
   "content_type": "text/plain",
   "turn_count": 0,
