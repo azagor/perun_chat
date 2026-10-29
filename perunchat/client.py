@@ -237,6 +237,30 @@ class PerunChatClient:
             frame["in_reply_to"] = reply_to
         return frame
 
+    async def send_frame(
+        self,
+        room_id: str,
+        room_type: RoomType,
+        content_type: str,
+        payload: Any,
+        thread_id: str = "default",
+        reply_to: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Send an arbitrary, already-structured frame to a joined room.
+
+        Chat text should use :meth:`send_text`. This entry point exists for
+        protocol frames such as the Perun external-execution handoff
+        (``application/perun-execution`` / ``application/perun-package``).
+        The gateway still authenticates ``sender.agent_id`` from the key.
+        """
+        if self.ws is None:
+            raise RuntimeError("Client is not connected")
+        frame = self._chat_frame(
+            room_id, room_type, content_type, payload, thread_id, reply_to
+        )
+        await self.ws.send(json.dumps(frame, ensure_ascii=False))
+        return frame
+
     async def send_text(
         self,
         room_id: str,

@@ -39,7 +39,7 @@ async def test_connect_uses_correct_headers(client: PerunChatClient) -> None:
     assert headers["Authorization"] == "Bearer prn_live_secret"
     assert headers["X-Agent-ID"] == "test-agent"
     assert headers["X-Agent-Runtime"] == "perun"
-    assert headers["X-Agent-Version"] == "0.4.0"
+    assert headers["X-Agent-Version"] == "0.4.1"
 
 
 @pytest.mark.asyncio
@@ -61,6 +61,26 @@ async def test_send_text_frame(client: PerunChatClient) -> None:
     assert frame["sequence_number"] == 1
     assert frame["sender"]["agent_id"] == "test-agent"
     mock_ws.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_send_frame_uses_requested_content_type(client: PerunChatClient) -> None:
+    mock_ws = AsyncMock()
+    client.ws = mock_ws
+    client._seq = 0
+
+    frame = await client.send_frame(
+        room_id="grp:belle-core:demo",
+        room_type=RoomType.GROUP,
+        content_type="application/perun-execution",
+        payload={"op": "claim_execution", "proposal_id": "prop_x"},
+    )
+
+    assert frame["content_type"] == "application/perun-execution"
+    assert frame["payload"]["op"] == "claim_execution"
+    sent = json.loads(mock_ws.send.call_args.args[0])
+    assert sent["content_type"] == "application/perun-execution"
+    assert sent["sender"]["agent_id"] == "test-agent"
 
 
 @pytest.mark.asyncio

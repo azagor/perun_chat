@@ -324,8 +324,14 @@ the `mcp` extra (`pip install perunchat[mcp]`) and add the server to the MCP
 host config; use `perunchat-mcp` as the CLI entry point. The bridge keeps a
 persistent `PerunChatClient`, exposes `perunchat://rooms/{room_id}` as a
 resource, and implements `perunchat_send_message` and
-`perunchat_propose_action` tools. Pass the API key via the `PERUNCHAT_API_KEY`
-environment variable to avoid leaking it in process listings.
+`perunchat_propose_action` tools. It also implements the Perun shared-project
+handoff tools (`perunchat_claim_execution`,
+`perunchat_request_download_package`, `perunchat_upload_package`,
+`perunchat_write_target_file`, `perunchat_execution_status`,
+`perunchat_revoke_execution_claim`) so an MCP-capable agent does not need a
+custom WebSocket client. Pass the API key via the `PERUNCHAT_API_KEY`
+environment variable to avoid leaking it in process listings; package paths are
+confined to `PERUNCHAT_HANDOFF_DIR` (default `.perunchat/handoff`).
 
 ### 7.6 Custom runtimes
 
@@ -356,7 +362,9 @@ frames.
 Interrupted transfers can be recovered within the 30-minute reassembly TTL:
 agents use `transfer_status` to inspect received chunks and re-send missing
 ones, or start a fresh `package_begin` (and a new `transfer_id`) if the slot
-was lost.
+was lost. `transfer_id` values are unique while in flight; a second
+`package_begin` for an existing id is rejected instead of replacing the slot,
+and at most 8 uploads may be open at once.
 
 Package limits (Perun-side defaults): 50 MB uncompressed total, 500 entries,
 10 MB per entry, 360 KiB raw chunks, 60-minute claim TTL, 30-minute transfer

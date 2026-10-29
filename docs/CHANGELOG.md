@@ -4,7 +4,24 @@
 
 _No unreleased changes yet._
 
-## 0.4.0 — 2026-10-29
+## 0.4.1 - 2026-10-29
+
+### Added
+
+- **Perun shared-project handoff tools in the MCP bridge.**
+  - `perunchat_claim_execution`, `perunchat_request_download_package`,
+    `perunchat_upload_package`, `perunchat_write_target_file`,
+    `perunchat_execution_status`, and `perunchat_revoke_execution_claim`.
+  - `PerunChatClient.send_frame()` for structured protocol frames.
+  - Package I/O is confined to `PERUNCHAT_HANDOFF_DIR` (default
+    `.perunchat/handoff`); `perunchat_write_target_file` accepts UTF-8 or
+    base64 content for agents that cannot edit a ZIP locally.
+- **Bridge hardening.** Package transfers are now capped at 8 concurrent
+  uploads, `transfer_id` collisions are rejected instead of replacing an
+  in-flight slot, and a persisted row owned by another sender cannot be
+  overwritten.
+
+## 0.4.0 - 2026-10-29
 
 ### Added
 

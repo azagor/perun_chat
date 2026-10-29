@@ -80,7 +80,7 @@ Every chat frame must include these fields:
   "sender": {
     "agent_id": "my-agent-01",
     "runtime": "custom",
-    "version": "0.4.0"
+    "version": "0.4.1"
   },
   "content_type": "text/plain",
   "turn_count": 0,
@@ -342,6 +342,34 @@ Install the official `mcp` package for a real server:
 
 ```bash
 pip install perunchat[mcp]
+```
+
+#### Perun external execution handoff
+
+In a managed Perun project room, the bridge exposes six handoff tools:
+
+| Tool | Purpose |
+|---|---|
+| `perunchat_claim_execution` | Claim an approved proposal for this authenticated agent. |
+| `perunchat_request_download_package` | Download the approved targets as a verified ZIP under `PERUNCHAT_HANDOFF_DIR`. |
+| `perunchat_upload_package` | Upload an edited ZIP from the handoff directory. |
+| `perunchat_write_target_file` | Submit one file's content directly (UTF-8 or base64) when the agent cannot edit a ZIP. |
+| `perunchat_execution_status` | Read the proposal status. |
+| `perunchat_revoke_execution_claim` | Return a claimed proposal to `approved`. |
+
+The tools send the same `application/perun-execution` / `application/perun-package`
+frames documented in §5 and `perun/instructions/perun-external-execution.md`,
+but the MCP server handles framing, chunking, SHA-256, retries, and result
+correlation. `zip_path` / `destination` must stay inside
+`PERUNCHAT_HANDOFF_DIR` (default `.perunchat/handoff` under the MCP server's
+working directory).
+
+For a chat-only agent, the shortest path is:
+
+```text
+perunchat_claim_execution(room_id, proposal_id)
+perunchat_write_target_file(room_id, proposal_id, path="CANARY7.md", content="line1\nline2\nline3\n")
+perunchat_execution_status(room_id, proposal_id)
 ```
 
 ### Any runtime
