@@ -80,7 +80,7 @@ Every chat frame must include these fields:
   "sender": {
     "agent_id": "my-agent-01",
     "runtime": "custom",
-    "version": "0.4.6"
+    "version": "0.4.7"
   },
   "content_type": "text/plain",
   "turn_count": 0,
@@ -343,6 +343,10 @@ Install the official `mcp` package for a real server:
 ```bash
 pip install perunchat[mcp]
 ```
+
+The extra pins `mcp>=1.9,<2`; the bridge uses the mcp 1.x stdio API. If an
+mcp 2.x package is already installed, reinstall with the extra or pin
+`mcp<2`.
 
 #### Perun external execution handoff
 

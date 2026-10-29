@@ -23,6 +23,7 @@ import base64
 import hashlib
 import io
 import json
+import logging
 import os
 import sys
 import time
@@ -30,6 +31,8 @@ import uuid
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger("perunchat.mcp_bridge")
 
 try:
     from mcp.server import Server
@@ -70,6 +73,7 @@ class PerunChatMCPServer:
         self._RiskTier: Any = None
         self._perun_agent_ids: Dict[str, str] = {}
         self._download_locks: Dict[str, asyncio.Lock] = {}
+        self._last_error = ""
         self._room_messages: Dict[str, List[Dict[str, Any]]] = {}
         # Control/result frames and package chunks are kept separately so the
         # chat resource stays small and chunks do not evict recent messages.
@@ -112,6 +116,14 @@ class PerunChatMCPServer:
         return self._client
 
     def _on_frame(self, frame: Dict[str, Any]) -> None:
+        if frame.get("type") == "ERROR":
+            self._last_error = str(frame.get("message") or "gateway error")
+            logger.warning(
+                "PerunChat gateway error: %s (room=%s)",
+                self._last_error,
+                frame.get("room_id", ""),
+            )
+            return
         content_type = frame.get("content_type")
         if content_type == self._PACKAGE_CONTENT_TYPE:
             self._buffer_package_frame(frame)
@@ -258,6 +270,10 @@ class PerunChatMCPServer:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + max(timeout, 0.1)
         while True:
+            if self._last_error:
+                error = self._last_error
+                self._last_error = ""
+                raise RuntimeError(f"PerunChat gateway rejected the frame: {error}")
             for frame in list(self._control_frames):
                 if int(frame.get("_mcp_seq") or 0) <= since:
                     continue
@@ -756,6 +772,7 @@ class PerunChatMCPServer:
         if name not in known:
             return _err(f"Unknown tool: {name}")
 
+        self._last_error = ""
         client = await self._ensure_client()
 
         room_id = arguments.get("room_id")
@@ -989,10 +1006,16 @@ def _result_response(payload: Dict[str, Any]) -> Dict[str, Any]:
 def serve_mcp(
     endpoint: str, api_key: str, agent_id: str, transport: str = "stdio"
 ) -> None:
-    """Entry point for an MCP stdio/SSE server."""
+    """Entry point for the MCP stdio server."""
     server = PerunChatMCPServer(endpoint, api_key, agent_id)
 
     if _HAS_MCP:
+        if not hasattr(Server, "list_resources"):
+            raise RuntimeError(
+                "perunchat.mcp_bridge requires the mcp 1.x server API. "
+                "Install with `pip install \"mcp>=1.9,<2\"` or reinstall "
+                "perunchat[mcp]."
+            )
         mcp = Server("perunchat")
 
         @mcp.list_resources()
@@ -1021,9 +1044,22 @@ def serve_mcp(
             return [TextContent(type="text", text=result["content"][0]["text"])]
 
         if transport == "stdio":
-            mcp.run(transport="stdio")
+            import anyio
+            from mcp.server.stdio import stdio_server
+
+            async def _run_stdio() -> None:
+                async with stdio_server() as (read_stream, write_stream):
+                    await mcp.run(
+                        read_stream,
+                        write_stream,
+                        mcp.create_initialization_options(),
+                    )
+
+            anyio.run(_run_stdio)
         elif transport == "sse":
-            mcp.run(transport="sse")
+            raise ValueError(
+                "SSE transport is not supported by this bridge build; use stdio"
+            )
         else:
             raise ValueError(f"Unsupported MCP transport: {transport}")
     else:
@@ -1045,7 +1081,7 @@ def main() -> None:
     parser.add_argument("--endpoint", default="wss://peruninthemachine.com/v1/chat/ws")
     parser.add_argument("--api-key", required=False)
     parser.add_argument("--agent-id", required=False)
-    parser.add_argument("--transport", default="stdio", choices=["stdio", "sse"])
+    parser.add_argument("--transport", default="stdio", choices=["stdio"])
     args = parser.parse_args()
     api_key = args.api_key or os.environ.get("PERUNCHAT_API_KEY")
     agent_id = args.agent_id or os.environ.get("PERUNCHAT_AGENT_ID")

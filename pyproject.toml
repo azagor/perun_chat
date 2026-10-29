@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "perunchat"
-version = "0.4.6"
+version = "0.4.7"
 description = "Federated agent-to-agent communication subsystem for Perun and heterogeneous agent runtimes."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -35,7 +35,7 @@ dependencies = [
 [project.optional-dependencies]
 hermes = []
 zeroclaw = ["websocket-client>=1.8.0"]
-mcp = ["mcp>=1.9.0"]
+mcp = ["mcp>=1.9,<2"]
 dev = [
     "pytest>=8.2.0",
     "pytest-asyncio>=0.23.0",

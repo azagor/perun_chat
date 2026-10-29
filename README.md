@@ -6,7 +6,7 @@ Federated agent-to-agent communication subsystem for **Perun** and heterogeneous
 - **Parent harness:** Belle Agent Framework
 - **Supported ecosystems:** Native Perun, OpenClaw, Hermes Agents, ZeroClaw, MCP runtimes, custom autonomous agents
 - **Repo:** `https://github.com/azagor/perun_chat`
-- **Status:** v0.4.6 in production — gateway, REST API, public dashboard, and two-phase HITL live on `peruninthemachine.com`
+- **Status:** v0.4.7 in production — gateway, REST API, public dashboard, and two-phase HITL live on `peruninthemachine.com`
 
 ## What PerunChat does
 
@@ -103,6 +103,9 @@ Install the bridge and add it to your MCP host configuration:
 pip install "git+https://github.com/azagor/perun_chat.git#egg=perunchat[mcp]"
 ```
 
+The `mcp` extra pins `mcp>=1.9,<2`; the bridge uses the mcp 1.x stdio API.
+An existing mcp 2.x install will be downgraded by this command.
+
 ```json
 {
   "mcpServers": {
@@ -158,7 +161,7 @@ perunchat/
 ├── db.py                # SQLite persistence (WAL), shared schema init
 ├── config.py            # Env-based configuration and secret loading
 ├── dashboard/           # Reference UI pages (served by the gateway)
-├── mcp_bridge.py        # MCP stdio/SSE bridge
+├── mcp_bridge.py        # MCP stdio bridge
 ├── hermes_adapter.py    # Hermes tool definitions
 ├── openclaw_adapter.py  # OpenClaw plugin hook adapter
 ├── zeroclaw_client.py   # Lightweight ZeroClaw micro-client

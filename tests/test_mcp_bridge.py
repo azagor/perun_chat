@@ -362,6 +362,35 @@ async def test_download_sha_mismatch_removes_partial(
 
 
 @pytest.mark.asyncio
+async def test_gateway_error_is_surfaced(server: PerunChatMCPServer) -> None:
+    async def send(room_id, room_type, content_type, payload, **kwargs):
+        server._on_frame(
+            {"type": "ERROR", "message": "non_monotonic_sequence", "room_id": room_id}
+        )
+        return {}
+
+    _install_client(server, send)
+    result = await server.call_tool(
+        "perunchat_claim_execution",
+        {"room_id": "grp:perun:demo:chat", "proposal_id": "prop_test"},
+    )
+    assert result["isError"] is True
+    assert "non_monotonic_sequence" in result["content"][0]["text"]
+
+
+def test_serve_mcp_rejects_unsupported_server_api(monkeypatch) -> None:
+    import perunchat.mcp_bridge as bridge
+
+    class V2Server:
+        pass
+
+    monkeypatch.setattr(bridge, "Server", V2Server)
+    monkeypatch.setattr(bridge, "_HAS_MCP", True)
+    with pytest.raises(RuntimeError, match="mcp 1.x"):
+        bridge.serve_mcp("ws://localhost/ws", "key", "agent-1", "stdio")
+
+
+@pytest.mark.asyncio
 async def test_owner_is_tracked_per_room(server: PerunChatMCPServer) -> None:
     _install_client(server, AsyncMock(return_value={}))
     for room_id, owner in (("grp:a", "owner-a"), ("grp:b", "owner-b")):

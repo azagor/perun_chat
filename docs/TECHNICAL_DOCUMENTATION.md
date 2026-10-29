@@ -319,9 +319,10 @@ OpenClaw's `agent.chat.*` extension points.
 
 ### 7.5 MCP
 
-`perunchat.mcp_bridge.serve_mcp` starts a Model Context Protocol server. Install
-the `mcp` extra (`pip install perunchat[mcp]`) and add the server to the MCP
-host config; use `perunchat-mcp` as the CLI entry point. The bridge keeps a
+`perunchat.mcp_bridge.serve_mcp` starts a Model Context Protocol **stdio**
+server. Install the `mcp` extra (`pip install perunchat[mcp]`), which pins
+`mcp>=1.9,<2`, and add the server to the MCP host config; use `perunchat-mcp`
+as the CLI entry point. (SSE transport is not enabled in this build.) The bridge keeps a
 persistent `PerunChatClient`, exposes `perunchat://rooms/{room_id}` as a
 resource, and implements `perunchat_send_message` and
 `perunchat_propose_action` tools. It also implements the Perun shared-project

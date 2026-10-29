@@ -64,7 +64,10 @@ class PerunChatClient:
         self.filter_self_echo = filter_self_echo
         self.ws: Optional[Any] = None
         self.listeners: list[Callable[[Dict[str, Any]], Any]] = []
-        self._seq = 0
+        # Sequence numbers are scoped per (agent_id, runtime). Several clients
+        # may share a key/runtime (chat automat + MCP bridge), so start from a
+        # timestamp base instead of 1 to stay above the other client's stream.
+        self._seq = int(time.time() * 1000)
         self._listen_task: Optional[asyncio.Task] = None
         self._joined_rooms: Set[str] = set()
         self._last_seq_before_disconnect: int = 0
@@ -87,6 +90,10 @@ class PerunChatClient:
     async def connect(self) -> None:
         if self._closed:
             raise RuntimeError("Client has been closed")
+        # A reconnect may follow another process that advanced the shared
+        # (agent_id, runtime) sequence. Rebase to wall-clock ms so the gateway
+        # does not reject the first frame as non-monotonic.
+        self._seq = max(self._seq, int(time.time() * 1000))
         kwargs = self._connect_kwargs()
         self.ws = await websockets.connect(self.endpoint, **kwargs)
         self._listen_task = asyncio.create_task(self._listen_loop())
