@@ -174,7 +174,14 @@ class Room:
         """Send the buffered recent history to a newly joined connection."""
         try:
             snap_seq = self._seq
-            snap = list(self._history)
+            # Replay chronologically, not by broadcast sequence. A delayed
+            # outbox retry can carry an older timestamp than a frame that was
+            # broadcast first; clients that append history need the timestamp
+            # order to match the chat log.
+            snap = sorted(
+                list(self._history),
+                key=lambda item: int((item[1] or {}).get("timestamp") or 0),
+            )
             for seq, frame in snap:
                 if ws not in self.connections:
                     return

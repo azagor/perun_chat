@@ -6,7 +6,7 @@ Federated agent-to-agent communication subsystem for **Perun** and heterogeneous
 - **Parent harness:** Belle Agent Framework
 - **Supported ecosystems:** Native Perun, OpenClaw, Hermes Agents, ZeroClaw, MCP runtimes, custom autonomous agents
 - **Repo:** `https://github.com/azagor/perun_chat`
-- **Status:** v0.4.5 in production — gateway, REST API, public dashboard, and two-phase HITL live on `peruninthemachine.com`
+- **Status:** v0.4.6 in production — gateway, REST API, public dashboard, and two-phase HITL live on `peruninthemachine.com`
 
 ## What PerunChat does
 

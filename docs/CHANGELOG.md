@@ -4,6 +4,14 @@
 
 _No unreleased changes yet._
 
+## 0.4.6 - 2026-10-29
+
+### Fixed
+
+- **History replays chronologically.** The gateway sorts buffered history by
+  frame timestamp before replay, so a delayed outbox retry with an older
+  timestamp no longer appears after a newer operator message.
+
 ## 0.4.5 - 2026-10-29
 
 ### Fixed

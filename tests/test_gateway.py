@@ -908,6 +908,31 @@ def _room(monkeypatch, n: int = 500) -> Any:
     return room
 
 
+def test_replay_sorts_history_by_timestamp(monkeypatch) -> None:
+    """A delayed outbox frame with an older timestamp replays first."""
+    from perunchat.gateway import Room
+
+    monkeypatch.setattr("perunchat.gateway.gateway", SimpleNamespace(social_graph=None))
+    room = Room("grp:test:room", "GROUP")
+
+    async def scenario() -> list[str]:
+        sender = FakeWS()
+        await room.join(sender, "alice")
+        await room.replay_history(sender, "alice")
+        newer = _frame(1)
+        newer["timestamp"] = 3000
+        older = _frame(2)
+        older["timestamp"] = 2000
+        await room.broadcast(sender, newer)
+        await room.broadcast(sender, older)
+        late = FakeWS()
+        await room.join(late, "bob")
+        await room.replay_history(late, "bob")
+        return [frame["id"] for frame in late.sent]
+
+    assert asyncio.run(scenario()) == ["m2", "m1"]
+
+
 def test_replay_is_ordered_and_live_frame_arrives_once(monkeypatch) -> None:
     """A late joiner receives history in order and a live frame sent mid-replay arrives exactly once, after it."""
     room = _room(monkeypatch)
