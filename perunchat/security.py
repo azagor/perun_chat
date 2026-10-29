@@ -430,7 +430,7 @@ class SecurityPipeline:
             refill_per_second=package_refill,
         )
 
-    async def check_ingress(
+    async def pre_validate(
         self,
         agent_id: str,
         room_id: str,
@@ -441,6 +441,11 @@ class SecurityPipeline:
         nonce: Optional[str] = None,
         content_type: str = "",
     ) -> Tuple[bool, Optional[str]]:
+        """Rate, sequence and timestamp checks before proposal/broadcast decisions.
+
+        This does **not** consume a turn credit; call :meth:`commit_turn` for
+        frames that will actually be broadcast.
+        """
         allowed = await self.rate_limiter.allow(agent_id, room_id)
         if not allowed:
             return False, "rate_limited"
@@ -454,12 +459,58 @@ class SecurityPipeline:
         if not ok:
             return False, reason
 
-        if content_type != "application/perun-package":
-            count, locked = self.turns.increment(room_id, runtime, agent_id)
-            if locked:
-                return False, "thread_locked_pending_operator"
-
         return True, None
+
+    def commit_turn(
+        self,
+        agent_id: str,
+        room_id: str,
+        runtime: str,
+        content_type: str = "",
+    ) -> Tuple[bool, Optional[str]]:
+        """Consume one turn credit for a frame that is about to be broadcast.
+
+        Returns ``(True, None)`` on success, or ``(False, reason)`` if the
+        room is locked or out of credits.
+        """
+        if content_type == "application/perun-package":
+            return True, None
+
+        count, locked = self.turns.increment(room_id, runtime, agent_id)
+        if locked:
+            return False, "thread_locked_pending_operator"
+        return True, None
+
+    async def check_ingress(
+        self,
+        agent_id: str,
+        room_id: str,
+        sequence_number: int,
+        timestamp_ms: int,
+        thread_id: str,
+        runtime: str,
+        nonce: Optional[str] = None,
+        content_type: str = "",
+    ) -> Tuple[bool, Optional[str]]:
+        ok, reason = await self.pre_validate(
+            agent_id=agent_id,
+            room_id=room_id,
+            sequence_number=sequence_number,
+            timestamp_ms=timestamp_ms,
+            thread_id=thread_id,
+            runtime=runtime,
+            nonce=nonce,
+            content_type=content_type,
+        )
+        if not ok:
+            return False, reason
+
+        return self.commit_turn(
+            agent_id=agent_id,
+            room_id=room_id,
+            runtime=runtime,
+            content_type=content_type,
+        )
 
     def scan_egress(self, frame: Dict[str, Any]) -> Dict[str, Any]:
         """Return a copy of the frame with DLP redactions applied to payload text."""

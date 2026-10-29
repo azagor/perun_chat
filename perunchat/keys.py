@@ -194,9 +194,13 @@ class KeyStore:
                 record.revoked_at = revoked_at
             return record
 
-    def update_scopes(self, key_id: str, scopes: List[str]) -> Optional[AgentKey]:
+    def update_scopes_by_owner(self, key_id: str, scopes: List[str], owner_id: str) -> Optional[AgentKey]:
+        """Update scopes only if the key belongs to *owner_id*."""
         with db_module.db(self._db_uri()) as conn:
-            row = conn.execute("SELECT * FROM agent_keys WHERE id = ?", (key_id,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM agent_keys WHERE id = ? AND owner_id = ? AND is_revoked = 0",
+                (key_id, owner_id),
+            ).fetchone()
             if not row:
                 return None
             conn.execute(

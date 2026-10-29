@@ -23,6 +23,7 @@ def reset_gateway(tmp_path):
     if api_module.social_graph is not None:
         api_module.social_graph.close()
     db_path = str(tmp_path / "perunchat.db")
+    os.environ["PERUNCHAT_DB_PATH"] = db_path
     fresh = KeyStore(db_path)
     gateway.keystore = fresh
     api_module.keystore = fresh
@@ -31,7 +32,11 @@ def reset_gateway(tmp_path):
     gateway.security = SecurityPipeline()
     gateway.rooms._acls.clear()
     gateway._rooms.clear()
-    api_module.pending_proposals.clear()
+    api_module.proposal_store = api_module.ProposalStore(db_path)
+    gateway.proposal_store = api_module.proposal_store
+    api_module.hitl_config.db_path = db_path
+    api_module.hitl_engine = api_module.HITLTokenEngine(api_module.hitl_config)
+    gateway.hitl_engine = api_module.hitl_engine
 
 
 client = TestClient(app)
@@ -404,6 +409,21 @@ def test_rooms_includes_online_members_and_count(tmp_path, monkeypatch):
     assert set(rooms[room_id]["online_members"]) == {"alice", "bob"}
 
 
+@pytest.mark.parametrize(
+    "bad_room",
+    ["grp:", "grp:bad space", "notgrp:acme:proj:room", "grp:../../etc", ""],
+)
+def test_create_group_room_rejects_malformed_room_id(bad_room: str) -> None:
+    """Managed group rooms must use the full grp:<tenant>:<project>:<slug> form."""
+    key, _ = _create(agent_id="room-creator")
+    res = client.post(
+        "/api/v1/rooms/group",
+        json={"room_id": bad_room, "members": []},
+        headers=_owner_headers(key),
+    )
+    assert res.status_code == 400
+
+
 def test_get_room_members_requires_access() -> None:
     """The members endpoint rejects rooms the caller cannot join."""
     key, _ = _create(agent_id="member-check")
@@ -443,3 +463,63 @@ def test_get_room_members_returns_online_and_persisted(tmp_path, monkeypatch):
     data = res.json()
     assert data["online"] == ["rooms-agent"]
     assert set(data["members"]) == {"rooms-agent", "offline-member"}
+
+
+def test_approve_proposal_twice_returns_409() -> None:
+    """Approving the same staged proposal a second time is rejected."""
+    headers = _auth(agent_id="approve-twice")
+    api_module.proposal_store.stage(
+        {
+            "id": "msg_p1",
+            "content_type": "application/perun-proposal",
+            "payload": {
+                "proposal_id": "p1",
+                "execution_details": {"command": "echo hello"},
+            },
+        }
+    )
+    resp = client.post(
+        "/api/v1/proposals/p1/approve",
+        json={"execution_details": {"command": "echo hello"}},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    resp2 = client.post(
+        "/api/v1/proposals/p1/approve",
+        json={"execution_details": {"command": "echo hello"}},
+        headers=headers,
+    )
+    assert resp2.status_code == 409
+    assert resp2.json()["detail"] == "proposal_already_approved"
+
+
+def test_mark_approved_is_atomic() -> None:
+    """Only one concurrent approval can flip a proposal to approved."""
+    frame = {
+        "content_type": "application/perun-proposal",
+        "payload": {"proposal_id": "p_atomic", "execution_details": {}},
+    }
+    api_module.proposal_store.stage(frame)
+    frame["_approved"] = True
+    assert api_module.proposal_store.mark_approved("p_atomic", frame) is True
+    assert api_module.proposal_store.mark_approved("p_atomic", frame) is False
+    assert api_module.proposal_store.mark_approved("missing", frame) is False
+
+
+def test_approve_proposal_with_bad_payload_returns_400() -> None:
+    """A staged proposal with no dict execution_details cannot be approved."""
+    headers = _auth(agent_id="approve-bad")
+    api_module.proposal_store.stage(
+        {
+            "id": "msg_bad",
+            "content_type": "application/perun-proposal",
+            "payload": {"proposal_id": "bad"},
+        }
+    )
+    resp = client.post(
+        "/api/v1/proposals/bad/approve",
+        json={"execution_details": {}},
+        headers=headers,
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "proposal_missing_execution_details"

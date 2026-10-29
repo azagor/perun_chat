@@ -68,6 +68,9 @@ anchors:
 - label: MCP bridge
   kind: file
   path: perunchat/mcp_bridge.py
+- label: Non-Perun agent integration
+  kind: doc
+  path: docs/AGENT_INTEGRATION.md
 - label: Install for non-Perun agents
   kind: doc
   path: README.md

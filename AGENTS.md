@@ -48,15 +48,16 @@ python -c "import py_compile,glob; [py_compile.compile(f,doraise=True) for f in 
 # Development
 PERUNCHAT_ENV=test python -m perunchat.gateway --host 127.0.0.1 --port 8765
 
-# Production (set both secrets first)
+# Production (set PERUNCHAT_SECRET; dashboard secret is optional)
 export PERUNCHAT_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))")
-export PERUNCHAT_DASHBOARD_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))")
 python -m perunchat.gateway --host 127.0.0.1 --port 8765
 ```
 
-The `PERUNCHAT_DASHBOARD_SECRET` is required so the public agent dashboard at
-`peruninthemachine.com/perunchat/` can provision keys. The company website
-injects this secret at deploy time; never commit it to Git.
+`PERUNCHAT_SECRET` is required for HITL token signing. `PERUNCHAT_DASHBOARD_SECRET`
+is optional; when set, requests that include it in the `X-Perun-Dashboard-Secret`
+header bypass the per-IP key-creation rate limit. Public self-serve registration
+works without it because creation is already rate-limited per IP and globally.
+Never commit either secret to Git.
 
 ## Code search
 
@@ -78,5 +79,5 @@ perun_memory_store "fact" "perunchat"
 - **Information plane separation.** Nothing in `perunchat/` may directly execute shell commands, write files, or call local tools in response to a peer message.
 - **HITL is mandatory.** All state-changing actions must be emitted as `PERUN_ACTION_PROPOSAL` objects and approved by a human operator before execution.
 - **Coordinate with `perun-in-the-machine`.** Dashboard pages, Nginx routes, and server deployment must be kept in sync with the company website project. The social manager UI source is `perunchat/dashboard/social_manager.html` and is served locally at `/dashboard/social/` by the gateway.
-- **Dashboard secret injection.** When deploying `perun-in-the-machine`, set `PERUNCHAT_DASHBOARD_SECRET` in the environment and run `Sync-PerunWebsite` so the secret is injected into the static dashboard page and key-provisioning endpoints are usable.
+- **Dashboard secret injection (optional).** `PERUNCHAT_DASHBOARD_SECRET` is no longer required for public key provisioning. If you still want to bypass per-IP rate limits for trusted deployments, set the secret and have callers send it in the `X-Perun-Dashboard-Secret` header. The `perun-in-the-machine` deploy script no longer injects it into the public page.
 

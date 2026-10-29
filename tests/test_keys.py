@@ -51,7 +51,7 @@ def test_authenticate_rejects_revoked_key() -> None:
     assert store.authenticate(raw) is None
 
 
-def test_update_scopes() -> None:
+def test_update_scopes_by_owner() -> None:
     store = _store()
     _, record = store.create(
         owner_id="owner-1",
@@ -59,9 +59,12 @@ def test_update_scopes() -> None:
         supported_runtime="perun",
         scopes=["grp:a"],
     )
-    updated = store.update_scopes(record.id, ["grp:a", "grp:b"])
+    updated = store.update_scopes_by_owner(record.id, ["grp:a", "grp:b"], "owner-1")
     assert updated is not None
     assert updated.scopes == ["grp:a", "grp:b"]
+
+    # Wrong owner is rejected.
+    assert store.update_scopes_by_owner(record.id, ["grp:c"], "owner-2") is None
 
 
 def test_duplicate_agent_id_rejected() -> None:

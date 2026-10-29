@@ -35,10 +35,11 @@ async def test_connect_uses_correct_headers(client: PerunChatClient) -> None:
 
     connect_mock.assert_called_once()
     _, kwargs = connect_mock.call_args
-    assert kwargs["extra_headers"]["Authorization"] == "Bearer prn_live_secret"
-    assert kwargs["extra_headers"]["X-Agent-ID"] == "test-agent"
-    assert kwargs["extra_headers"]["X-Agent-Runtime"] == "perun"
-    assert kwargs["extra_headers"]["X-Agent-Version"] == "0.1.0"
+    headers = kwargs.get("additional_headers") or kwargs.get("extra_headers")
+    assert headers["Authorization"] == "Bearer prn_live_secret"
+    assert headers["X-Agent-ID"] == "test-agent"
+    assert headers["X-Agent-Runtime"] == "perun"
+    assert headers["X-Agent-Version"] == "0.4.0"
 
 
 @pytest.mark.asyncio
@@ -120,3 +121,64 @@ async def test_disconnect(client: PerunChatClient) -> None:
 
     assert task.cancelled() or task.done()
     mock_ws.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_attempt_reconnect_does_not_await_itself() -> None:
+    """Reconnect runs inside the listener task; it must not await that task."""
+    client = PerunChatClient(
+        endpoint="ws://127.0.0.1:8765/v1/chat/ws",
+        api_key="prn_live_secret",
+        agent_id="test-agent",
+        runtime="perun",
+        reconnect=True,
+    )
+    client.ws = AsyncMock()
+    # Simulate being called from inside the listener task.
+    client._listen_task = asyncio.current_task()
+
+    reconnect_calls: list[int] = []
+
+    async def fake_connect() -> None:
+        reconnect_calls.append(1)
+        # Avoid starting a real listener during this test.
+        client._listen_task = None
+
+    with patch.object(client, "connect", side_effect=fake_connect):
+        with patch("perunchat.client.asyncio.sleep", new=AsyncMock()):
+            await asyncio.wait_for(client._attempt_reconnect(), timeout=2)
+
+    assert reconnect_calls == [1]
+    assert client._listen_task is None
+
+
+@pytest.mark.asyncio
+async def test_reconnect_rejoins_private_rooms() -> None:
+    """After a reconnect, the client must rejoin private rooms as PRIVATE."""
+    client = PerunChatClient(
+        endpoint="ws://127.0.0.1:8765/v1/chat/ws",
+        api_key="prn_live_secret",
+        agent_id="test-agent",
+        runtime="perun",
+        reconnect=True,
+    )
+    client._joined_rooms = {"pub:global:general", "grp:project:room", "prv:alice:bob"}
+
+    join_calls: list = []
+
+    async def mock_connect(*args, **kwargs):
+        mock_ws = AsyncMock()
+        return mock_ws
+
+    async def mock_join(room_id: str, room_type: RoomType) -> None:
+        join_calls.append((room_id, room_type))
+
+    with patch("websockets.connect", side_effect=mock_connect):
+        with patch.object(client, "join_room", side_effect=mock_join):
+            await client.connect()
+
+    assert ("pub:global:general", RoomType.PUBLIC) in join_calls
+    assert ("grp:project:room", RoomType.GROUP) in join_calls
+    assert ("prv:alice:bob", RoomType.PRIVATE) in join_calls
+
+    await client.disconnect()

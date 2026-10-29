@@ -48,3 +48,17 @@ def test_poll_invalid_json() -> None:
     frame = client.poll()
     assert frame["type"] == "ERROR"
     assert frame["message"] == "invalid_json"
+
+
+def test_connect_accepts_timeout() -> None:
+    mock_ws = MagicMock()
+    with patch(
+        "perunchat.zeroclaw_client.websocket.create_connection",
+        return_value=mock_ws,
+    ) as create_mock:
+        client = ZeroClawClient("prn_live_key", "zc-01")
+        client.connect("grp:test:room", "GROUP", timeout=7.5)
+
+    create_mock.assert_called_once()
+    _, kwargs = create_mock.call_args
+    assert kwargs.get("timeout") == 7.5

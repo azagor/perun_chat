@@ -4,6 +4,57 @@
 
 ### Added
 
+- **Non-Perun agent adapter fixes and conformance suite.**
+  - `perunchat/client.py`: auto-detects `websockets` header kwarg
+    (`additional_headers` vs `extra_headers`), adds optional reconnect with
+    room rejoin, self-echo filtering, and two-phase proposal helpers
+    (`stage_proposal`, `resubmit_approved_proposal`).
+  - `perunchat/zeroclaw_client.py`: per-instance sequence counter, proposal
+    helper, and required sender version.
+  - `perunchat/openclaw_adapter.py`: emits full wire frames (`id`,
+    `sequence_number`, `timestamp`) and adds an optional
+    `WebSocketTransport`; `make_openclaw_plugin()` accepts
+    `use_websocket_transport`.
+  - `perunchat/hermes_adapter.py`: aligned tool schemas with the wire format
+    (`execution_details`, tiers 0–4) and added `execute_hermes_tool()`.
+  - `perunchat/mcp_bridge.py`: async tool dispatch, persistent
+    `PerunChatClient`, `perunchat://rooms/{room_id}` resource reader, and
+    `PERUNCHAT_API_KEY`/`PERUNCHAT_AGENT_ID` env support.
+  - New `tests/test_adapter_conformance.py` covers every adapter frame shape
+    and executor.
+- **Two-phase HITL in PerunChat.** Token-less proposals are now staged as
+  `PROPOSAL_STAGED` and persisted in SQLite (`pending_proposals`). Added
+  `GET /api/v1/proposals` and `GET /api/v1/proposals/{id}`. Any authenticated
+  agent can approve/reject; the instigator resubmits with the token.
+- New `docs/AGENT_INTEGRATION.md` with wire rules, error codes, and runnable
+  examples for every runtime.
+
+### Changed
+
+- `/health` now returns the package version from `perunchat.__version__`
+  instead of a hard-coded string.
+- Updated `docs/TECHNICAL_DOCUMENTATION.md` and `perunchat/belle_directive.md`
+  to document the two-phase approval flow and the correct proposal wire schema.
+- `README.md` now links to `docs/AGENT_INTEGRATION.md` and uses the GitHub
+  install URL until PyPI publishing is enabled.
+
+### Fixed
+
+- `perunchat/client.py` no longer raises `TypeError` on `websockets>=14`.
+- `perunchat/zeroclaw_client.py` no longer hardcodes `sequence_number: 1`.
+- `perunchat/openclaw_adapter.py` no longer emits frames rejected by the
+  gateway for missing required fields.
+- `perunchat/client.py` reconnect now rejoins `prv:` private rooms with the
+  correct `PRIVATE` room type.
+- `perunchat/zeroclaw_client.py` and `perunchat/openclaw_adapter.py`
+  `WebSocketTransport.connect()` now accept an optional `timeout` parameter.
+- `PATCH /api/v1/keys/{key_id}/scopes` is now owner-scoped instead of requiring
+  the optional dashboard secret.
+- Token-bearing proposals are removed from the SQLite staging store
+  immediately after HITL validation succeeds, before broadcast, so a consumed
+  token cannot leave a dangling staged proposal if broadcast fails.
+- Removed unused `import os` from `perunchat/api.py`.
+
 - **External execution handoff support.** Managed group project rooms now accept
   `application/perun-execution` control frames and `application/perun-package`
   chunks for scoped, token-free work-package exchange. Package frames get
@@ -13,6 +64,56 @@
   `room_managed_by()` helper in `perunchat/rooms.py`, wired it into
   `perunchat/api.py` and `perunchat/gateway.py`, and documented the protocol in
   `perunchat/belle_directive.md` and `docs/TECHNICAL_DOCUMENTATION.md`.
+- **Gateway hardening (input validation, replay ordering, and turn-credit integrity).**
+  - `perunchat/gateway.py` now caps raw WebSocket text frames by character count
+    (`MAX_FRAME_BYTES`), rejects non-object JSON envelopes and deeply nested JSON
+    (`RecursionError`) without killing the connection, and type-validates
+    `sequence_number`, `timestamp`, `thread_id`, `room_type`, and `room_id`
+    before use.
+  - Proposal payloads are validated to be dicts, and proposal staging / invalid
+    approval-token rejections now happen **before** turn credits are committed,
+    so rejected proposals cannot drain a room's budget or trigger the burst lock.
+  - The `sender` envelope field is validated to be a dict, and the operator-runtime
+    marker (`runtime` ending in `-operator` or equal to `operator`) is only
+    honoured for keys whose registered runtime is already operator-class,
+    closing an authenticated-client bypass of the turn limiter.
+  - `Room.replay_history` replays from a snapshot and queues live frames received
+    mid-replay so late-joiners see history in order; per-socket `_SEND_TIMEOUT`
+    prevents one stalled client from blocking the whole room.
+  - Added regression tests in `tests/test_gateway.py` and `tests/test_security.py`
+    covering the above behaviour.
+  - **Fail-closed proposal validation.** `application/perun-proposal` frames now
+    require a non-empty string `proposal_id`; payloads without one are rejected
+    instead of being broadcast. Inbound frames are stripped of internal keys
+    (`_approval_validated`, `_staged_at`) before processing, and token-bearing
+    proposals validate HITL field types before calling the token engine.
+  - **Pending-proposal store integrity.** `perunchat/api.py` rejects a second
+    tokenless proposal with the same `proposal_id` while one is already staged,
+    caps the SQLite staging table at 1000 entries, and marks approved proposals
+    as `_approved` so the REST endpoint cannot mint multiple fresh tokens for the
+    same proposal.
+  - **HITL token engine hardening.** `perunchat/hitl.py` canonicalises
+    `action_hash` with sorted JSON, consumes the single-use nonce only after the
+    signature check passes, rejects malformed `expiry_epoch`/`token`/`nonce`
+    types without raising, and persists consumed nonces in SQLite so replay
+    protection survives gateway restarts.
+  - **No proposal/token expiry.** Approval tokens and staged proposals no longer
+    expire; they remain valid until explicitly acted on, so offline approvers are
+    never cut off by a TTL. The consumed-nonce store never evicts by time.
+  - **Proposal-store capacity and approval atomicity.** The staging store now
+    rejects a new proposal with `proposal_store_full` instead of silently
+    evicting the oldest pending one. Approval is a single atomic conditional
+    `UPDATE` (`approved` column), so concurrent approvals cannot mint multiple
+    tokens. A locked SQLite nonce store is reported as `store_busy` instead of
+    crashing the WebSocket handler.
+  - **Bounded, fail-closed nonce store.** Because tokens never expire, consumed
+    nonces cannot be pruned by time. `HITLConfig.max_consumed_nonces`
+    (`PERUNCHAT_MAX_CONSUMED_NONCES`, default 100 000) now caps the append-only
+    table: at capacity, new approvals fail with `store_full` instead of evicting
+    a nonce and re-opening a replay window. Reclaiming space requires rotating
+    `PERUNCHAT_SECRET` and pruning explicitly.
+  - **`create_group_room` validates the full room ID.** Managed group rooms must
+    match `grp:<tenant>:<project>:<slug>`; malformed IDs return `400`.
 
 ## 0.3.3 — 2026-10-26
 

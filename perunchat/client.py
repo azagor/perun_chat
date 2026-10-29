@@ -10,14 +10,23 @@ Host: peruninthemachine.com
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
+import random
 import time
 import uuid
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 import httpx
 import websockets
+
+from ._version import __version__
+
+try:
+    from websockets.exceptions import ConnectionClosed
+except Exception:  # pragma: no cover
+    ConnectionClosed = websockets.ConnectionClosed  # type: ignore[attr-defined, misc]
 
 
 class RoomType(str, Enum):
@@ -40,29 +49,63 @@ class PerunChatClient:
         api_key: str,
         agent_id: str,
         runtime: str = "custom",  # 'perun' | 'openclaw' | 'hermes' | 'zeroclaw' | 'custom'
-        version: str = "0.1.0",
+        version: Optional[str] = None,
+        reconnect: bool = False,
+        max_reconnect_delay: float = 30.0,
+        filter_self_echo: bool = True,
     ):
         self.endpoint = endpoint
         self.api_key = api_key
         self.agent_id = agent_id
         self.runtime = runtime
-        self.version = version
-        self.ws: Optional[websockets.WebSocketClientProtocol] = None
+        self.version = version or __version__
+        self.reconnect = reconnect
+        self.max_reconnect_delay = max(max_reconnect_delay, 1.0)
+        self.filter_self_echo = filter_self_echo
+        self.ws: Optional[Any] = None
         self.listeners: list[Callable[[Dict[str, Any]], Any]] = []
         self._seq = 0
         self._listen_task: Optional[asyncio.Task] = None
+        self._joined_rooms: Set[str] = set()
+        self._last_seq_before_disconnect: int = 0
+        self._closed = False
 
-    async def connect(self) -> None:
+    def _connect_kwargs(self) -> Dict[str, Any]:
+        """Return the correct header kwarg for the installed websockets version."""
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "X-Agent-ID": self.agent_id,
             "X-Agent-Runtime": self.runtime,
             "X-Agent-Version": self.version,
         }
-        self.ws = await websockets.connect(self.endpoint, extra_headers=headers)
+        # websockets >= 14 renamed extra_headers to additional_headers.
+        sig = inspect.signature(websockets.connect)
+        if "additional_headers" in sig.parameters:
+            return {"additional_headers": headers}
+        return {"extra_headers": headers}
+
+    async def connect(self) -> None:
+        if self._closed:
+            raise RuntimeError("Client has been closed")
+        kwargs = self._connect_kwargs()
+        self.ws = await websockets.connect(self.endpoint, **kwargs)
         self._listen_task = asyncio.create_task(self._listen_loop())
+        # Restore any rooms that were joined before a reconnect.
+        for room_id in list(self._joined_rooms):
+            # Room type is encoded in the id prefix; default to GROUP if ambiguous.
+            if room_id.startswith("pub:"):
+                room_type = RoomType.PUBLIC
+            elif room_id.startswith("prv:"):
+                room_type = RoomType.PRIVATE
+            else:
+                room_type = RoomType.GROUP
+            await self.join_room(room_id, room_type)
 
     async def disconnect(self) -> None:
+        self._closed = True
+        await self._shutdown_connection()
+
+    async def _shutdown_connection(self) -> None:
         if self._listen_task is not None:
             self._listen_task.cancel()
             try:
@@ -71,7 +114,10 @@ class PerunChatClient:
                 pass
             self._listen_task = None
         if self.ws is not None:
-            await self.ws.close()
+            try:
+                await self.ws.close()
+            except Exception:
+                pass
             self.ws = None
 
     async def _listen_loop(self) -> None:
@@ -83,10 +129,12 @@ class PerunChatClient:
                     frame = json.loads(raw_message)
                 except json.JSONDecodeError:
                     continue
+                if self.filter_self_echo:
+                    sender = frame.get("sender") or {}
+                    if sender.get("agent_id") == self.agent_id:
+                        continue
                 for listener in list(self.listeners):
                     try:
-                        import inspect
-
                         if inspect.iscoroutinefunction(listener):
                             await listener(frame)
                         else:
@@ -94,10 +142,35 @@ class PerunChatClient:
                     except Exception:
                         # Listener errors must not break the receive loop.
                         pass
-        except websockets.ConnectionClosed:
+        except ConnectionClosed:
             pass
         except asyncio.CancelledError:
             raise
+        finally:
+            if not self._closed and self.reconnect:
+                await self._attempt_reconnect()
+
+    async def _attempt_reconnect(self) -> None:
+        """Reconnect with capped exponential backoff and rejoin tracked rooms."""
+        self._last_seq_before_disconnect = self._seq
+        # The listener task is the caller of this coroutine. Detach it before
+        # closing the socket so _shutdown_connection does not try to await the
+        # current task (asyncio raises "Task cannot await on itself").
+        self._listen_task = None
+        if self.ws is not None:
+            try:
+                await self.ws.close()
+            except Exception:
+                pass
+            self.ws = None
+        delay = 1.0
+        while not self._closed:
+            try:
+                await asyncio.sleep(delay)
+                await self.connect()
+                return
+            except Exception:
+                delay = min(delay * 2 + random.random(), self.max_reconnect_delay)
 
     def on_message(self, handler: Callable[[Dict[str, Any]], Any]) -> None:
         self.listeners.append(handler)
@@ -108,6 +181,7 @@ class PerunChatClient:
     async def join_room(self, room_id: str, room_type: RoomType) -> None:
         if self.ws is None:
             raise RuntimeError("Client is not connected")
+        self._joined_rooms.add(room_id)
         join_payload = {
             "type": "ROOM_JOIN",
             "room_id": room_id,
@@ -119,6 +193,7 @@ class PerunChatClient:
     async def leave_room(self, room_id: str, room_type: RoomType) -> None:
         if self.ws is None:
             raise RuntimeError("Client is not connected")
+        self._joined_rooms.discard(room_id)
         leave_payload = {
             "type": "ROOM_LEAVE",
             "room_id": room_id,
@@ -126,6 +201,41 @@ class PerunChatClient:
             "timestamp": int(time.time() * 1000),
         }
         await self.ws.send(json.dumps(leave_payload, ensure_ascii=False))
+
+    def _next_seq(self) -> int:
+        self._seq += 1
+        return self._seq
+
+    def _chat_frame(
+        self,
+        room_id: str,
+        room_type: RoomType,
+        content_type: str,
+        payload: Any,
+        thread_id: str = "default",
+        reply_to: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        frame: Dict[str, Any] = {
+            "id": f"msg_{uuid.uuid4().hex}",
+            "trace_id": f"trc_{uuid.uuid4().hex[:20]}",
+            "thread_id": thread_id,
+            "sequence_number": self._next_seq(),
+            "timestamp": int(time.time() * 1000),
+            "room_type": room_type.value,
+            "room_id": room_id,
+            "sender": {
+                "agent_id": self.agent_id,
+                "runtime": self.runtime,
+                "version": self.version,
+            },
+            "recipient_id": None,
+            "content_type": content_type,
+            "turn_count": 0,
+            "payload": payload,
+        }
+        if reply_to:
+            frame["in_reply_to"] = reply_to
+        return frame
 
     async def send_text(
         self,
@@ -137,27 +247,9 @@ class PerunChatClient:
     ) -> Dict[str, Any]:
         if self.ws is None:
             raise RuntimeError("Client is not connected")
-        self._seq += 1
-        frame: Dict[str, Any] = {
-            "id": f"msg_{uuid.uuid4().hex}",
-            "trace_id": f"trc_{uuid.uuid4().hex[:20]}",
-            "thread_id": thread_id,
-            "sequence_number": self._seq,
-            "timestamp": int(time.time() * 1000),
-            "room_type": room_type.value,
-            "room_id": room_id,
-            "sender": {
-                "agent_id": self.agent_id,
-                "runtime": self.runtime,
-                "version": self.version,
-            },
-            "recipient_id": None,
-            "content_type": "text/plain",
-            "turn_count": 0,
-            "payload": text,
-        }
-        if reply_to:
-            frame["in_reply_to"] = reply_to
+        frame = self._chat_frame(
+            room_id, room_type, "text/plain", text, thread_id, reply_to
+        )
         await self.ws.send(json.dumps(frame, ensure_ascii=False))
         return frame
 
@@ -171,12 +263,12 @@ class PerunChatClient:
         justification: str,
         thread_id: str = "default",
         approval_token: Optional[Dict[str, Any]] = None,
+        proposal_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         if self.ws is None:
             raise RuntimeError("Client is not connected")
-        self._seq += 1
         payload: Dict[str, Any] = {
-            "proposal_id": f"prop_{uuid.uuid4().hex[:12]}",
+            "proposal_id": proposal_id or f"prop_{uuid.uuid4().hex[:12]}",
             "proposal_type": "PERUN_ACTION_PROPOSAL",
             "risk_tier": risk_tier.value,
             "action_domain": action_domain,
@@ -191,26 +283,67 @@ class PerunChatClient:
             payload["approval_token"] = approval_token["token"]
             payload["approval_expiry_epoch"] = approval_token["expiry_epoch"]
             payload["approval_nonce"] = approval_token["nonce"]
-        proposal_frame = {
-            "id": f"msg_{uuid.uuid4().hex}",
-            "trace_id": f"trc_{uuid.uuid4().hex[:20]}",
-            "thread_id": thread_id,
-            "sequence_number": self._seq,
-            "timestamp": int(time.time() * 1000),
-            "room_type": RoomType.GROUP.value,
-            "room_id": room_id,
-            "sender": {
-                "agent_id": self.agent_id,
-                "runtime": self.runtime,
-                "version": self.version,
-            },
-            "recipient_id": None,
-            "content_type": "application/perun-proposal",
-            "turn_count": 0,
-            "payload": payload,
-        }
-        await self.ws.send(json.dumps(proposal_frame, ensure_ascii=False))
-        return proposal_frame
+        frame = self._chat_frame(
+            room_id,
+            RoomType.GROUP,
+            "application/perun-proposal",
+            payload,
+            thread_id,
+        )
+        await self.ws.send(json.dumps(frame, ensure_ascii=False))
+        return frame
+
+    async def stage_proposal(
+        self,
+        room_id: str,
+        risk_tier: RiskTier,
+        action_domain: str,
+        description: str,
+        execution_details: Dict[str, Any],
+        justification: str,
+        thread_id: str = "default",
+        proposal_id: Optional[str] = None,
+    ) -> str:
+        """Stage a token-less proposal. Returns the proposal id."""
+        pid = proposal_id or f"prop_{uuid.uuid4().hex[:12]}"
+        await self.submit_proposal(
+            room_id=room_id,
+            risk_tier=risk_tier,
+            action_domain=action_domain,
+            description=description,
+            execution_details=execution_details,
+            justification=justification,
+            thread_id=thread_id,
+            proposal_id=pid,
+        )
+        return pid
+
+    async def resubmit_approved_proposal(
+        self,
+        proposal_id: str,
+        approval_token: Dict[str, Any],
+    ) -> None:
+        """Fetch a staged proposal and resubmit it with an approval token."""
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{self._rest_base()}/api/v1/proposals/{proposal_id}",
+                headers=self._headers(),
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        proposal = data.get("proposal") or {}
+        payload = proposal.get("payload") or {}
+        await self.submit_proposal(
+            room_id=proposal.get("room_id", ""),
+            risk_tier=RiskTier(payload.get("risk_tier", "TIER_2_LOW_IMPACT")),
+            action_domain=payload.get("action_domain", "API"),
+            description=payload.get("description", ""),
+            execution_details=payload.get("execution_details", {}),
+            justification=(payload.get("provenance") or {}).get("justification", ""),
+            thread_id=proposal.get("thread_id", "default"),
+            approval_token=approval_token,
+            proposal_id=proposal_id,
+        )
 
     # ------------------------------------------------------------------
     # Social graph helpers (REST API)

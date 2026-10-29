@@ -7,9 +7,11 @@ Endpoints from master specification §4.2:
   DELETE /api/v1/keys/{id}   - revoke key
   PATCH  /api/v1/keys/{id}/scopes - update scopes
 
-Plus:
+Proposals (two-phase HITL):
+  GET    /api/v1/proposals              - list staged proposals
+  GET    /api/v1/proposals/{id}         - get a staged proposal
   POST   /api/v1/proposals/{id}/approve - issue approval token
-  POST   /api/v1/proposals/{id}/reject - reject proposal
+  POST   /api/v1/proposals/{id}/reject  - reject proposal
 
 Social graph (friends / blocked / friend requests):
   POST   /api/v1/social/friends/requests            - send friend request
@@ -25,10 +27,12 @@ Social graph (friends / blocked / friend requests):
 
 from __future__ import annotations
 
-import os
+import json
+import sqlite3
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator, List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
@@ -50,14 +54,158 @@ router = APIRouter(prefix="/api/v1")
 # Shared state: in production these live in Redis/Postgres and are injected.
 keystore = KeyStore(db_path=config.db_path())
 social_graph = SocialGraph(db_path=config.db_path())
-hitl_config = HITLConfig(secret_key=config.secret_key())
+hitl_config = HITLConfig(
+    secret_key=config.secret_key(),
+    db_path=config.db_path(),
+    max_consumed_nonces=config.max_consumed_nonces(),
+)
 hitl_engine = HITLTokenEngine(hitl_config)
 
-# Pending proposals keyed by proposal_id. Maps to the frame that staged them.
-pending_proposals: Dict[str, Dict[str, Any]] = {}
 
-# Proposals older than this many seconds are considered stale and may be evicted.
-_PROPOSAL_TTL_SECONDS = 600
+class ProposalStoreFull(Exception):
+    """Raised when the pending-proposal store is at its capacity limit."""
+
+
+class ProposalStore:
+    """SQLite-backed staging store for PERUN_ACTION_PROPOSAL frames."""
+
+    def __init__(self, db_path: str) -> None:
+        self.db_path = db_path
+        # ``:memory:`` databases are fresh per connection, so keep one
+        # long-lived connection for the module-level in-memory store. File
+        # stores continue to open a connection per operation.
+        self._memory_conn: sqlite3.Connection | None = None
+        if db_path == ":memory:":
+            self._memory_conn = sqlite3.connect(":memory:", check_same_thread=False)
+            self._memory_conn.row_factory = sqlite3.Row
+            self._memory_conn.executescript(db_module.SCHEMA)
+            self._memory_conn.commit()
+        else:
+            # Ensure the pending_proposals table exists (idempotent).
+            db_module.init_db(db_path)
+        # Migrate older databases that predate the ``approved`` column. A
+        # dedicated column lets approval be a single atomic conditional UPDATE,
+        # so two concurrent requests cannot both mint a token.
+        with self._with_conn() as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(pending_proposals)")}
+            if "approved" not in columns:
+                conn.execute(
+                    "ALTER TABLE pending_proposals "
+                    "ADD COLUMN approved INTEGER NOT NULL DEFAULT 0"
+                )
+                conn.commit()
+
+    @contextmanager
+    def _with_conn(self) -> Iterator[Any]:
+        if self._memory_conn is not None:
+            yield self._memory_conn
+        else:
+            with db_module.db(self.db_path) as conn:
+                yield conn
+
+    def close(self) -> None:
+        if self._memory_conn is not None:
+            self._memory_conn.close()
+            self._memory_conn = None
+
+    # Hard cap on the in-memory/SQLite staging table to avoid unbounded growth.
+    _MAX_PENDING_PROPOSALS = 1000
+
+    def stage(self, frame: Dict[str, Any]) -> None:
+        """Insert or replace a staged proposal frame.
+
+        Raises :class:`ProposalStoreFull` when a *new* proposal would exceed
+        the capacity limit. Existing proposals may always be re-staged (for
+        example when an approval flag is written back).
+        """
+        proposal_id = (frame.get("payload") or {}).get("proposal_id")
+        if not proposal_id:
+            return
+        with self._with_conn() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM pending_proposals WHERE proposal_id = ?",
+                (proposal_id,),
+            ).fetchone()
+            if not exists:
+                count_row = conn.execute(
+                    "SELECT COUNT(*) AS cnt FROM pending_proposals"
+                ).fetchone()
+                if count_row and count_row["cnt"] >= self._MAX_PENDING_PROPOSALS:
+                    raise ProposalStoreFull(proposal_id)
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO pending_proposals
+                (proposal_id, frame_json, created_at, approved)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    proposal_id,
+                    json.dumps(frame, ensure_ascii=False),
+                    int(time.time()),
+                    int(bool(frame.get("_approved"))),
+                ),
+            )
+            conn.commit()
+
+    def mark_approved(self, proposal_id: str, frame: Dict[str, Any]) -> bool:
+        """Atomically mark a proposal approved.
+
+        Returns ``False`` when the proposal is already approved or no longer
+        exists, so the caller can return a conflict instead of minting a
+        second token.
+        """
+        with self._with_conn() as conn:
+            cursor = conn.execute(
+                "UPDATE pending_proposals SET frame_json = ?, approved = 1 "
+                "WHERE proposal_id = ? AND approved = 0",
+                (json.dumps(frame, ensure_ascii=False), proposal_id),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+
+    def get(self, proposal_id: str) -> Optional[Dict[str, Any]]:
+        with self._with_conn() as conn:
+            row = conn.execute(
+                "SELECT frame_json FROM pending_proposals WHERE proposal_id = ?",
+                (proposal_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row["frame_json"])
+
+    def list_for_agent(self, agent_id: str) -> List[Dict[str, Any]]:
+        """Return all pending proposals instigated by the given agent."""
+        agent_id_lower = agent_id.lower()
+        with self._with_conn() as conn:
+            rows = conn.execute(
+                "SELECT frame_json FROM pending_proposals ORDER BY created_at DESC"
+            ).fetchall()
+        proposals: List[Dict[str, Any]] = []
+        for row in rows:
+            frame = json.loads(row["frame_json"])
+            sender = frame.get("sender") or {}
+            provenance = (frame.get("payload") or {}).get("provenance") or {}
+            instigator = provenance.get("instigator", sender.get("agent_id", ""))
+            if instigator.lower() == agent_id_lower:
+                proposals.append(frame)
+        return proposals
+
+    def remove(self, proposal_id: str) -> None:
+        with self._with_conn() as conn:
+            conn.execute(
+                "DELETE FROM pending_proposals WHERE proposal_id = ?",
+                (proposal_id,),
+            )
+            conn.commit()
+
+    def clear(self) -> None:
+        """Test helper to empty the pending proposal store."""
+        with self._with_conn() as conn:
+            conn.execute("DELETE FROM pending_proposals")
+            conn.commit()
+
+
+proposal_store = ProposalStore(config.db_path())
 
 
 class CreateKeyRequest(BaseModel):
@@ -298,18 +446,6 @@ def _delete_managed_room(room_id: str) -> None:
     invalidate_managed_room_cache(room_id)
 
 
-def _evict_stale_proposals() -> None:
-    """Remove proposals that have not been acted on within the TTL window."""
-    now = int(time.time())
-    stale = [
-        pid
-        for pid, proposal in pending_proposals.items()
-        if now - proposal.get("_staged_at", 0) > _PROPOSAL_TTL_SECONDS
-    ]
-    for pid in stale:
-        pending_proposals.pop(pid, None)
-
-
 @router.post("/keys")
 async def create_key(
     req: CreateKeyRequest,
@@ -429,35 +565,72 @@ def revoke_key(
 def update_key_scopes(
     key_id: str,
     req: ScopesPatch,
+    caller: AgentKey = Depends(get_current_agent),
     store: KeyStore = Depends(get_keystore),
-    _: None = Depends(require_dashboard_secret),
 ) -> Dict[str, Any]:
-    record = store.update_scopes(key_id, req.scopes)
+    """Update scopes for a key owned by the authenticated caller."""
+    record = store.update_scopes_by_owner(key_id, req.scopes, caller.owner_id)
     if record is None:
-        raise HTTPException(status_code=404, detail="key_not_found")
+        raise HTTPException(status_code=404, detail="key_not_found_or_not_owned")
     return {"ok": True, "id": record.id, "scopes": record.scopes}
+
+
+@router.get("/proposals")
+def list_proposals(
+    caller: AgentKey = Depends(get_current_agent),
+) -> Dict[str, Any]:
+    """List all staged proposals visible to the authenticated agent."""
+    proposals = proposal_store.list_for_agent(caller.agent_id)
+    return {"ok": True, "proposals": proposals}
+
+
+@router.get("/proposals/{proposal_id}")
+def get_proposal(
+    proposal_id: str,
+    caller: AgentKey = Depends(get_current_agent),
+) -> Dict[str, Any]:
+    """Get a single staged proposal."""
+    proposal = proposal_store.get(proposal_id)
+    if proposal is None:
+        raise HTTPException(status_code=404, detail="proposal_not_found")
+    return {"ok": True, "proposal": proposal}
 
 
 @router.post("/proposals/{proposal_id}/approve")
 def approve_proposal(
     proposal_id: str,
     req: ApproveRequest,
+    caller: AgentKey = Depends(get_current_agent),
     engine: HITLTokenEngine = Depends(get_hitl),
 ) -> Dict[str, Any]:
-    _evict_stale_proposals()
-    proposal = pending_proposals.get(proposal_id)
+    """
+    Issue an approval token for a staged proposal.
+
+    Any authenticated agent can approve; the token is bound to the original
+    execution details, and the instigator must resubmit the proposal with the
+    token before it can be broadcast.
+
+    Proposals do not expire; they remain staged until explicitly approved or
+    rejected.
+    """
+    proposal = proposal_store.get(proposal_id)
     if proposal is None:
         raise HTTPException(status_code=404, detail="proposal_not_found")
+    if proposal.get("_approved"):
+        raise HTTPException(status_code=409, detail="proposal_already_approved")
     # Bind the approval token to the *original* execution details staged with the
     # proposal, not whatever the dashboard sends.
-    original_details = (
-        proposal.get("payload", {}).get("execution_details")
-        if proposal.get("content_type") == "application/perun-proposal"
-        else None
-    )
-    if original_details is None:
+    payload = proposal.get("payload")
+    if not isinstance(payload, dict) or proposal.get("content_type") != "application/perun-proposal":
+        raise HTTPException(status_code=400, detail="proposal_missing_execution_details")
+    original_details = payload.get("execution_details")
+    if not isinstance(original_details, dict):
         raise HTTPException(status_code=400, detail="proposal_missing_execution_details")
     token = engine.issue(proposal_id, original_details)
+    proposal["_approved"] = True
+    if not proposal_store.mark_approved(proposal_id, proposal):
+        # Another request won the race (or the proposal was removed).
+        raise HTTPException(status_code=409, detail="proposal_already_approved")
     return {"ok": True, "approval_token": token}
 
 
@@ -465,11 +638,13 @@ def approve_proposal(
 def reject_proposal(
     proposal_id: str,
     req: RejectRequest,
+    caller: AgentKey = Depends(get_current_agent),
 ) -> Dict[str, Any]:
-    _evict_stale_proposals()
-    proposal = pending_proposals.pop(proposal_id, None)
+    """Reject and remove a staged proposal."""
+    proposal = proposal_store.get(proposal_id)
     if proposal is None:
         raise HTTPException(status_code=404, detail="proposal_not_found")
+    proposal_store.remove(proposal_id)
     return {
         "ok": True,
         "proposal_id": proposal_id,
@@ -643,7 +818,11 @@ def create_group_room(
     room's lifetime is tied to an external object (e.g. a Perun project).
     """
     room_id = (req.room_id or "").strip()
-    if not room_id.startswith("grp:"):
+    try:
+        scope, _ = parse_room_id(room_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid_room_id")
+    if scope != "grp":
         raise HTTPException(status_code=400, detail="group_room_must_start_with_grp:")
 
     managed_by = (req.managed_by or caller.agent_id).strip().lower()
@@ -920,7 +1099,7 @@ __all__ = [
     "keystore",
     "social_graph",
     "hitl_engine",
-    "pending_proposals",
+    "proposal_store",
     "get_current_agent",
     "list_rooms",
 ]

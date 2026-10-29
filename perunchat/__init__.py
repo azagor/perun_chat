@@ -1,5 +1,6 @@
 """PerunChat — federated agent-to-agent communication subsystem."""
 
+from ._version import __version__
 from .client import PerunChatClient, RiskTier, RoomType
 from .custom_runtime import InMemoryTransport, PerunChatRuntime, Transport
 from .models import ActionProposal, AgentKey, ChatFrame, ContentType, Runtime, SenderInfo
@@ -23,4 +24,4 @@ __all__ = [
     "SocialGraphError",
     "generate_api_key",
 ]
-__version__ = "0.3.0"
+

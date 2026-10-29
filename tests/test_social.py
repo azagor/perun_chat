@@ -28,6 +28,7 @@ def reset_gateway(tmp_path):
     if api_module.social_graph is not None:
         api_module.social_graph.close()
     db_path = str(tmp_path / "perunchat.db")
+    os.environ["PERUNCHAT_DB_PATH"] = db_path
     fresh = KeyStore(db_path)
     gateway.keystore = fresh
     api_module.keystore = fresh
@@ -36,7 +37,8 @@ def reset_gateway(tmp_path):
     gateway.security = SecurityPipeline()
     gateway.rooms._acls.clear()
     gateway._rooms.clear()
-    api_module.pending_proposals.clear()
+    api_module.proposal_store = api_module.ProposalStore(db_path)
+    gateway.proposal_store = api_module.proposal_store
 
 
 client = TestClient(app)

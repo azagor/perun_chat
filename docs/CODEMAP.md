@@ -7,10 +7,11 @@ Navigation source of truth. Start every lookup here.
 | Project manifest | `perun.md` | `perunchat` slug, docs, commands, anchors | `perun.md` |
 | Agent reference | `AGENTS.md` | build/test commands, server access constraints | `AGENTS.md` |
 | User overview | `README.md` | quick start, project layout | `README.md` |
-| Technical spec | `docs/TECHNICAL_DOCUMENTATION.md` | wire protocol, security model, HITL | `docs/TECHNICAL_DOCUMENTATION.md` |
+| Agent integration | `docs/AGENT_INTEGRATION.md` | non-Perun agent wire protocol, two-phase HITL, examples | `docs/AGENT_INTEGRATION.md` |
+| Technical spec | `docs/TECHNICAL_DOCUMENTATION.md` | architecture, wire protocol, security model, HITL | `docs/TECHNICAL_DOCUMENTATION.md` |
 | Changelog | `docs/CHANGELOG.md` | release history | `docs/CHANGELOG.md` |
-| Python SDK | `perunchat/client.py` | `PerunChatClient`, `RoomType`, `RiskTier` | §7.1 spec, `README.md` |
-| Gateway server | `perunchat/gateway.py` | `app`, `ChatGateway`, `handle_ws`, `_effective_runtime`, proposal cleanup, echo/replay preservation | §2 spec, `docs/TECHNICAL_DOCUMENTATION.md` |
+| Python SDK | `perunchat/client.py` | `PerunChatClient`, `RoomType`, `RiskTier`, reconnect, self-echo filter, two-phase helpers | §7.1 spec, `README.md`, `docs/AGENT_INTEGRATION.md` |
+| Gateway server | `perunchat/gateway.py` | `app`, `ChatGateway`, `handle_ws`, `_effective_runtime`, echo/replay preservation | §2 spec, `docs/TECHNICAL_DOCUMENTATION.md` |
 | API endpoints | `perunchat/api.py` | `router`, key endpoints, `/api/v1/me`, `/api/v1/rooms` (room discovery: persisted memberships + active rooms + `public_rooms()`), availability check | §4/5 spec |
 | Security pipeline | `perunchat/security.py` | `SecurityPipeline`, `DLPScanner`, `RateLimiter`, `AuthRateLimiter`, `SequenceValidator`, `TurnCounter` (per-agent keys, resets on operator/custom/dashboard/human runtimes, prunes stale entries) | §3/5 spec |
 | HITL tokens | `perunchat/hitl.py` | `HITLTokenEngine`, `ApprovalStore` | §5.7 spec |
@@ -21,14 +22,14 @@ Navigation source of truth. Start every lookup here.
 | Social graph | `perunchat/social.py` | `SocialGraph`, `SocialGraphError` | §5.4 spec |
 | Social dashboard | `perunchat/dashboard/social_manager.html` | `/dashboard/social/` | README |
 | Models | `perunchat/models.py` | `ChatFrame`, `ActionProposal`, `AgentKey` | §2/4/5 spec |
-| Hermes adapter | `perunchat/hermes_adapter.py` | `HERMES_PERUNCHAT_TOOLS` | §7.2 spec |
-| ZeroClaw micro-client | `perunchat/zeroclaw_client.py` | `connect_zeroclaw` | §7.3 spec |
-| OpenClaw adapter | `perunchat/openclaw_adapter.py` | `PerunChatOpenClawPlugin`, `make_openclaw_plugin` | §7 spec |
+| Hermes adapter | `perunchat/hermes_adapter.py` | `HERMES_PERUNCHAT_TOOLS`, `execute_hermes_tool` | §7.2 spec, `docs/AGENT_INTEGRATION.md` |
+| ZeroClaw micro-client | `perunchat/zeroclaw_client.py` | `ZeroClawClient`, `connect_zeroclaw` | §7.3 spec, `docs/AGENT_INTEGRATION.md` |
+| OpenClaw adapter | `perunchat/openclaw_adapter.py` | `PerunChatOpenClawPlugin`, `WebSocketTransport`, `make_openclaw_plugin` | §7 spec, `docs/AGENT_INTEGRATION.md` |
 | Custom runtime bridge | `perunchat/custom_runtime.py` | `PerunChatRuntime`, `Transport` | §7 spec |
-| MCP bridge | `perunchat/mcp_bridge.py` | `serve_mcp`, `PerunChatMCPServer` | §7.4 spec |
+| MCP bridge | `perunchat/mcp_bridge.py` | `serve_mcp`, `PerunChatMCPServer`, persistent client, resource reader | §7.4 spec, `docs/AGENT_INTEGRATION.md` |
 | Belle directive | `perunchat/belle_directive.md` | `PERUN_ACTION_PROPOSAL` format + external execution handoff | §6 spec, §6.1 external execution |
 | Deployment | `DEPLOY.md`, `systemd/perunchat.service` | install steps, `EnvironmentFile=/etc/perunchat.env`, Nginx `/chat/` + `/v1/chat/ws` routes, live VPS facts | `DEPLOY.md` |
-| Test suite | `tests/` | `test_api.py` (keys, social, room discovery), `test_gateway.py`, `test_social.py`, `test_keys.py`, `test_security.py`, `test_mcp_bridge.py`, adapter/model tests — 98 tests | `README.md` |
+| Test suite | `tests/` | `test_api.py`, `test_gateway.py`, `test_social.py`, `test_keys.py`, `test_security.py`, `test_mcp_bridge.py`, `test_adapter_conformance.py`, adapter/model tests — 137 tests | `README.md` |
 | Package init | `perunchat/__init__.py` | exports | `README.md` |
 | Packaging | `pyproject.toml` | dependencies, scripts | `README.md` |
 

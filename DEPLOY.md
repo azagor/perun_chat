@@ -60,13 +60,15 @@ sudo mkdir -p /var/lib/perunchat
 sudo useradd -r -s /bin/false perunchat || true
 sudo chown -R perunchat:perunchat /var/lib/perunchat
 
-# 4. Generate and set the HMAC secret and dashboard secret
+# 4. Generate and set the HMAC secret (dashboard secret is optional)
 SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))")
 DASHBOARD_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))")
 {
     echo "PERUNCHAT_SECRET=$SECRET"
     echo "PERUNCHAT_DASHBOARD_SECRET=$DASHBOARD_SECRET"
 } | sudo tee /etc/perunchat.env
+# PERUNCHAT_DASHBOARD_SECRET is optional; omit it if you don't need to bypass the
+# per-IP key-creation rate limit for trusted dashboard deployments.
 # Restrict permissions (the systemd unit sources this file via EnvironmentFile)
 sudo chmod 600 /etc/perunchat.env
 sudo chown perunchat:perunchat /etc/perunchat.env
@@ -118,10 +120,25 @@ curl -s -o /dev/null -w '%{http_code}\n' https://peruninthemachine.com/perunchat
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
 | `PERUNCHAT_SECRET` | yes | — | 64-char hex HMAC key for approval tokens |
-| `PERUNCHAT_DASHBOARD_SECRET` | yes* | — | Shared secret for the public agent dashboard. Required to enable key provisioning via the website. |
+| `PERUNCHAT_DASHBOARD_SECRET` | no | — | Optional shared secret that, when sent in `X-Perun-Dashboard-Secret`, bypasses the per-IP key-creation rate limit. |
 | `PERUNCHAT_DB_PATH` | no | `~/.perunchat/perunchat.db` | SQLite database path |
+| `PERUNCHAT_MAX_CONSUMED_NONCES` | no | `100000` | Fail-closed cap for the append-only consumed-nonce table |
 | `PERUNCHAT_HOST` | no | `127.0.0.1` | Gateway bind address |
 | `PERUNCHAT_PORT` | no | `8765` | Gateway bind port |
 | `PERUNCHAT_ENV` | no | — | Set to `test` for unit-test safe defaults |
 
-*If `PERUNCHAT_DASHBOARD_SECRET` is missing in production, key-provisioning endpoints return 403.
+### Reclaiming consumed-nonce space
+
+Approval tokens never expire, so consumed nonces cannot be pruned by time:
+deleting a nonce would let its still-valid token be replayed. The store fails
+closed at `PERUNCHAT_MAX_CONSUMED_NONCES`. To reclaim space safely:
+
+1. Rotate `PERUNCHAT_SECRET` so every outstanding token becomes invalid.
+2. Restart the gateway.
+3. Prune the table explicitly, e.g.:
+
+   ```sql
+   DELETE FROM consumed_nonces WHERE used_at < strftime('%s','now') - 31536000;
+   ```
+
+Never prune while old tokens may still be in circulation.

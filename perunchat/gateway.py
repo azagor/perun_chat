@@ -17,7 +17,7 @@ import time
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Optional, Set, Tuple
 
 from fastapi import Depends, FastAPI, Header, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
@@ -25,11 +25,11 @@ from fastapi.staticfiles import StaticFiles
 logger = logging.getLogger("perunchat.gateway")
 
 from . import config, db as db_module
+from . import __version__
+from . import api as api_module
 from .api import (
     _persist_room_member,
-    hitl_engine,
     keystore,
-    pending_proposals,
     router,
     social_graph,
 )
@@ -45,6 +45,12 @@ _MAX_PAYLOAD_BYTES = 8192
 # Managed project rooms accept larger package-transfer frames so external agents
 # can hand off ZIP work packages without splitting into thousands of chunks.
 _PACKAGE_MAX_PAYLOAD_BYTES = 524_288  # 512 KiB
+# Hard ceiling on the raw incoming WebSocket text frame before parsing.
+# Measured in characters: receive_text() returns str. This is a cheap
+# pre-parse guard; the WebSocket server also enforces its own byte limit.
+MAX_FRAME_BYTES = _PACKAGE_MAX_PAYLOAD_BYTES + 16_384
+# Per-socket send timeout so one stalled client cannot block the whole room.
+_SEND_TIMEOUT = 5.0
 _PACKAGE_CONTENT_TYPE = "application/perun-package"
 _EXECUTION_CONTENT_TYPES = {
     "application/perun-execution",
@@ -55,7 +61,10 @@ _EXECUTION_CONTENT_TYPES = {
 
 def _is_managed_project_room(room_id: str) -> bool:
     """True only for group rooms explicitly managed in the gateway DB."""
-    scope, _ = parse_room_id(room_id)
+    try:
+        scope, _ = parse_room_id(room_id)
+    except ValueError:
+        return False
     if scope != "grp":
         return False
     return room_managed_by(room_id) is not None
@@ -73,13 +82,24 @@ class Room:
         self.room_id = room_id
         self.room_type = room_type
         self.connections: Dict[WebSocket, str] = {}
-        self._history: deque[Dict[str, Any]] = deque(maxlen=_MAX_ROOM_HISTORY)
+        # History is stored as (seq, frame) tuples so replay can dedupe live
+        # frames that arrive while the replay loop is yielding on the socket.
+        self._history: deque[Tuple[int, Dict[str, Any]]] = deque(maxlen=_MAX_ROOM_HISTORY)
+        self._seq = 0
+        # Sockets still replaying history buffer live frames here instead of
+        # receiving them out of order from the main broadcast loop.
+        self._replaying: Set[WebSocket] = set()
+        self._pending: Dict[WebSocket, list] = {}
 
     async def join(self, ws: WebSocket, agent_id: str) -> None:
         self.connections[ws] = agent_id
+        self._replaying.add(ws)
+        self._pending[ws] = []
 
     async def leave(self, ws: WebSocket) -> None:
         self.connections.pop(ws, None)
+        self._replaying.discard(ws)
+        self._pending.pop(ws, None)
 
     def online_agent_ids(self) -> Set[str]:
         """Return the set of authenticated agent IDs currently connected."""
@@ -89,48 +109,93 @@ class Room:
                 ids.add(agent_id)
         return ids
 
+    def _blocked(self, recipient_agent_id: str, sender_agent_id: str) -> bool:
+        """Return True if delivery from sender to recipient is blocked."""
+        graph = gateway.social_graph
+        return bool(
+            sender_agent_id
+            and recipient_agent_id
+            and graph is not None
+            and graph.is_blocked(recipient_agent_id, sender_agent_id)
+        )
+
+    async def _send(self, conn: WebSocket, message: str) -> bool:
+        """Send to one socket with a timeout; return False if it should be dropped."""
+        try:
+            await asyncio.wait_for(conn.send_text(message), _SEND_TIMEOUT)
+            return True
+        except Exception:
+            return False
 
     async def broadcast(self, sender: WebSocket, frame: Dict[str, Any]) -> None:
         sender_agent_id = self.connections.get(sender)
         message = json.dumps(frame, ensure_ascii=False)
+        self._seq += 1
+        seq = self._seq
         # Only store real chat frames for late-joiners; ephemeral control frames
         # such as PRESENCE_UPDATE should not be replayed. Store a deep copy so
         # any later mutation of the broadcast frame cannot corrupt the replay
         # buffer, and preserve the original sender (including runtime) exactly.
-        if (frame.get("sender") or {}).get("agent_id") \
-                and frame.get("content_type") != _PACKAGE_CONTENT_TYPE:
-            self._history.append(copy.deepcopy(frame))
-        dead: Set[WebSocket] = set()
+        stored = bool(
+            (frame.get("sender") or {}).get("agent_id")
+            and frame.get("content_type") != _PACKAGE_CONTENT_TYPE
+        )
+        if stored:
+            self._history.append((seq, copy.deepcopy(frame)))
+        targets: list[WebSocket] = []
         for conn, recipient_agent_id in list(self.connections.items()):
-            # Respect bilateral blocks: don't deliver to a recipient who has
-            # blocked the sender, and don't deliver from a sender who has
-            # blocked the recipient.
-            graph = gateway.social_graph
-            if sender_agent_id and recipient_agent_id and graph is not None:
-                if graph.is_blocked(recipient_agent_id, sender_agent_id):
-                    continue
-            try:
-                await conn.send_text(message)
-            except Exception:
-                dead.add(conn)
-        for conn in dead:
-            self.connections.pop(conn, None)
+            if self._blocked(recipient_agent_id, sender_agent_id):
+                continue
+            if conn in self._replaying:
+                # Buffer for sockets still receiving history so ordering is preserved.
+                self._pending.setdefault(conn, []).append(
+                    (seq, message, stored, sender_agent_id)
+                )
+            else:
+                targets.append(conn)
+        results = await asyncio.gather(*(self._send(c, message) for c in targets))
+        for conn, ok in zip(targets, results):
+            if not ok:
+                await self.leave(conn)
+                try:
+                    await conn.close()
+                except Exception:
+                    pass
 
     async def replay_history(self, ws: WebSocket, agent_id: str) -> None:
         """Send the buffered recent history to a newly joined connection."""
-        if not self._history:
-            return
-        graph = gateway.social_graph
-        for frame in self._history:
-            sender_id = (frame.get("sender") or {}).get("agent_id")
-            # Skip messages from/blocked for this recipient.
-            if sender_id and graph is not None:
-                if graph.is_blocked(agent_id, sender_id):
+        try:
+            snap_seq = self._seq
+            snap = list(self._history)
+            for seq, frame in snap:
+                if ws not in self.connections:
+                    return
+                sender_id = (frame.get("sender") or {}).get("agent_id")
+                if self._blocked(agent_id, sender_id):
                     continue
-            try:
-                await ws.send_text(json.dumps(frame, ensure_ascii=False))
-            except Exception:
-                break
+                if not await self._send(ws, json.dumps(frame, ensure_ascii=False)):
+                    await self.leave(ws)
+                    return
+            while True:
+                pend = self._pending.get(ws)
+                if pend is None or ws not in self.connections:
+                    return
+                # Drop stored frames that are already in the snapshot; ephemeral
+                # frames such as presence updates are always delivered.
+                batch = [b for b in pend if not (b[2] and b[0] <= snap_seq)]
+                pend.clear()
+                if not batch:
+                    self._replaying.discard(ws)
+                    return
+                for seq, message, stored, sender_id in batch:
+                    if self._blocked(agent_id, sender_id):
+                        continue
+                    if not await self._send(ws, message):
+                        await self.leave(ws)
+                        return
+        finally:
+            self._replaying.discard(ws)
+            self._pending.pop(ws, None)
 
 
 class ChatGateway:
@@ -222,19 +287,6 @@ gateway = ChatGateway(
 )
 
 
-async def _proposal_cleanup_task() -> None:
-    """Background task that evicts stale pending proposals every 60 seconds."""
-    from .api import _evict_stale_proposals
-
-    while True:
-        await asyncio.sleep(60)
-        try:
-            _evict_stale_proposals()
-        except Exception:
-            # Cleanup failures must not crash the gateway.
-            pass
-
-
 async def _turn_counter_cleanup_task() -> None:
     """Background task that prunes stale TurnCounter entries every 5 minutes."""
     while True:
@@ -267,15 +319,9 @@ def _load_room_members() -> None:
 async def lifespan(app: FastAPI):
     app.state.gateway = gateway
     _load_room_members()
-    cleanup = asyncio.create_task(_proposal_cleanup_task())
     turn_cleanup = asyncio.create_task(_turn_counter_cleanup_task())
     yield
-    cleanup.cancel()
     turn_cleanup.cancel()
-    try:
-        await cleanup
-    except asyncio.CancelledError:
-        pass
     try:
         await turn_cleanup
     except asyncio.CancelledError:
@@ -346,7 +392,7 @@ def _effective_runtime(key_record: Optional[Any], header_runtime: str) -> str:
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:
-    return {"ok": True, "service": "perunchat-gateway", "version": "0.2.5"}
+    return {"ok": True, "service": "perunchat-gateway", "version": __version__}
 
 
 @app.websocket("/v1/chat/ws")
@@ -407,17 +453,57 @@ async def handle_ws(
     try:
         while True:
             raw = await ws.receive_text()
+            if len(raw) > MAX_FRAME_BYTES:
+                await ws.close(code=1009, reason="frame_too_large")
+                break
+
             try:
                 envelope = json.loads(raw)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, RecursionError):
                 await ws.send_text(
                     json.dumps({"type": "ERROR", "message": "invalid_json"})
+                )
+                continue
+
+            if not isinstance(envelope, dict):
+                await ws.send_text(
+                    json.dumps({"type": "ERROR", "message": "invalid_envelope"})
                 )
                 continue
 
             msg_type = envelope.get("type")
             room_id = envelope.get("room_id")
             room_type = envelope.get("room_type", "GROUP")
+
+            # room_id is used as a dict key before parse_room_id is called, so a
+            # non-string value must be rejected here rather than later.
+            if room_id is not None and not isinstance(room_id, str):
+                await ws.send_text(
+                    json.dumps(
+                        {"type": "ERROR", "message": "invalid_envelope_fields"}
+                    )
+                )
+                continue
+
+            seq = envelope.get("sequence_number", 0)
+            ts = envelope.get("timestamp", 0)
+            thread_id = envelope.get("thread_id", "default")
+            if (
+                not isinstance(seq, int)
+                or isinstance(seq, bool)
+                or seq < 0
+                or not isinstance(ts, (int, float))
+                or isinstance(ts, bool)
+                or not isinstance(thread_id, str)
+                or isinstance(room_type, bool)
+                or not isinstance(room_type, str)
+            ):
+                await ws.send_text(
+                    json.dumps(
+                        {"type": "ERROR", "message": "invalid_envelope_fields"}
+                    )
+                )
+                continue
 
             if msg_type == "ROOM_JOIN" and room_id:
                 try:
@@ -468,20 +554,25 @@ async def handle_ws(
                 room = await gateway.ensure_room(room_id, room_type)
                 await room.join(ws, agent_id or f"anon:{remote_addr}")
                 active_rooms[room_id] = room
-                if agent_id and scope == "pub":
-                    # Persist public joins so GET /api/v1/rooms can offer a
-                    # durable catalog of channels across gateway restarts.
-                    _persist_room_member(room_id, agent_id)
-                await ws.send_text(
-                    json.dumps(
-                        {
-                            "type": "ROOM_JOINED",
-                            "room_id": room_id,
-                            "room_type": room_type,
-                        }
+                try:
+                    if agent_id and scope == "pub":
+                        # Persist public joins so GET /api/v1/rooms can offer a
+                        # durable catalog of channels across gateway restarts.
+                        _persist_room_member(room_id, agent_id)
+                    await ws.send_text(
+                        json.dumps(
+                            {
+                                "type": "ROOM_JOINED",
+                                "room_id": room_id,
+                                "room_type": room_type,
+                            }
+                        )
                     )
-                )
-                await room.replay_history(ws, agent_id or "")
+                    await room.replay_history(ws, agent_id or "")
+                except BaseException:
+                    await room.leave(ws)
+                    active_rooms.pop(room_id, None)
+                    raise
                 continue
 
             if msg_type == "ROOM_LEAVE" and room_id:
@@ -541,23 +632,46 @@ async def handle_ws(
                 )
                 continue
 
+            # Validate and coerce the sender envelope before touching nested fields.
+            sender = envelope.get("sender")
+            if sender is not None and not isinstance(sender, dict):
+                await ws.send_text(
+                    json.dumps(
+                        {"type": "ERROR", "message": "invalid_envelope_fields"}
+                    )
+                )
+                continue
+
             # Inject sender identity server-side before validation so clients
             # (especially browser dashboards) don't need to know their bound agent_id.
             # Dashboards mark manual operator messages with a runtime containing
             # "operator" (conventionally "<agent_id>-operator"). Preserve that
-            # signal across instances so the UI can always distinguish a human
-            # operator from an autonomous agent, even when the same API key is
-            # otherwise bound to the "perun" runtime.
-            client_runtime = str((envelope.get("sender") or {}).get("runtime") or "").lower()
-            if client_runtime.endswith("-operator") or client_runtime == "operator":
+            # signal only for keys that are already registered as operator-class
+            # runtimes, so arbitrary authenticated clients cannot disable turn limits
+            # by claiming operator status.
+            client_runtime = str((sender or {}).get("runtime") or "").lower()
+            key_runtime = (
+                str(key_record.supported_runtime or "").lower()
+                if key_record
+                else ""
+            )
+            key_is_operator_class = (
+                key_runtime.endswith("-operator")
+                or key_runtime in {"operator", "perun", "dashboard", "human"}
+            )
+            if (
+                key_is_operator_class
+                and (client_runtime.endswith("-operator") or client_runtime == "operator")
+            ):
                 frame_runtime = f"{agent_id}-operator"
             else:
                 frame_runtime = runtime
             frame = envelope
-            frame.setdefault("sender", {})
-            frame["sender"]["agent_id"] = agent_id
-            frame["sender"]["runtime"] = frame_runtime
-            frame["sender"]["version"] = version
+            frame["sender"] = {
+                "agent_id": agent_id,
+                "runtime": frame_runtime,
+                "version": version,
+            }
 
             content_type = frame.get("content_type")
             is_execution_frame = content_type in _EXECUTION_CONTENT_TYPES
@@ -605,11 +719,10 @@ async def handle_ws(
                 )
                 continue
 
-            # Security pipeline checks.
-            seq = envelope.get("sequence_number", 0)
-            ts = envelope.get("timestamp", 0)
-            thread_id = envelope.get("thread_id", "default")
-            ok, reason = await gateway.security.check_ingress(
+            # Rate/sequence/timestamp validation. This intentionally does not
+            # consume a turn credit yet; credits are committed only for frames
+            # that survive proposal staging/validation and are about to broadcast.
+            ok, reason = await gateway.security.pre_validate(
                 agent_id=agent_id,
                 room_id=room_id,
                 sequence_number=seq,
@@ -623,12 +736,6 @@ async def handle_ws(
                 await ws.send_text(json.dumps({"type": "ERROR", "message": reason}))
                 continue
 
-            try:
-                turn_key = gateway.security.turns._key(room_id, agent_id or "")
-                frame["turn_count"] = int(gateway.security.turns._credits.get(turn_key, gateway.security.turns.MAX_CREDITS))
-            except Exception:
-                frame["turn_count"] = 0
-
             # Egress DLP. Package frames carry binary base64 that the entropy
             # scanner would corrupt, so they bypass DLP inside managed rooms.
             if content_type == _PACKAGE_CONTENT_TYPE and is_managed_room:
@@ -636,49 +743,158 @@ async def handle_ws(
             else:
                 safe_frame = gateway.security.scan_egress(frame)
 
-            # If this is a proposal, validate any supplied approval token and stage
-            # it for the dashboard.
+            # Strip internal state keys that clients must never set themselves.
+            for _internal_key in ("_approval_validated", "_staged_at"):
+                safe_frame.pop(_internal_key, None)
+
+            # If this is a proposal, either stage it (token-less) or validate the
+            # supplied approval token. Rejections here must not consume turn credits.
             if safe_frame.get("content_type") == "application/perun-proposal":
-                payload = safe_frame.get("payload") or {}
-                proposal_id = payload.get("proposal_id")
-                if proposal_id:
-                    # A state-changing proposal must carry a valid approval token.
-                    token = payload.get("approval_token")
-                    execution_details = payload.get("execution_details") or {}
-                    expiry_epoch = payload.get("approval_expiry_epoch")
-                    nonce = payload.get("approval_nonce")
-                    if not token or expiry_epoch is None or not nonce:
-                        await ws.send_text(
-                            json.dumps(
-                                {
-                                    "type": "ERROR",
-                                    "message": "proposal_missing_approval_token",
-                                    "proposal_id": proposal_id,
-                                }
-                            )
+                payload = safe_frame.get("payload")
+                if not isinstance(payload, dict):
+                    await ws.send_text(
+                        json.dumps(
+                            {"type": "ERROR", "message": "invalid_proposal_payload"}
                         )
-                        continue
-                    ok, hitl_reason = hitl_engine.validate(
-                        token=token,
-                        proposal_id=proposal_id,
-                        execution_details=execution_details,
-                        expiry_epoch=expiry_epoch,
-                        nonce=nonce,
                     )
-                    if not ok:
+                    continue
+                proposal_id = payload.get("proposal_id")
+                if not isinstance(proposal_id, str) or not proposal_id:
+                    await ws.send_text(
+                        json.dumps(
+                            {"type": "ERROR", "message": "invalid_proposal_payload"}
+                        )
+                    )
+                    continue
+
+                token = payload.get("approval_token")
+                execution_details = payload.get("execution_details") or {}
+                expiry_epoch = payload.get("approval_expiry_epoch")
+                approval_nonce = payload.get("approval_nonce")
+                token_fields_present = (
+                    token is not None
+                    or expiry_epoch is not None
+                    or approval_nonce is not None
+                )
+                if not token_fields_present:
+                    # Token-less proposals are staged for dashboard approval.
+                    if api_module.proposal_store.get(proposal_id) is not None:
                         await ws.send_text(
                             json.dumps(
                                 {
                                     "type": "ERROR",
-                                    "message": f"proposal_approval_invalid:{hitl_reason}",
+                                    "message": "proposal_id_conflict",
                                     "proposal_id": proposal_id,
                                 }
                             )
                         )
                         continue
-                    safe_frame["_approval_validated"] = True
                     safe_frame["_staged_at"] = int(time.time())
-                    pending_proposals[proposal_id] = safe_frame
+                    try:
+                        api_module.proposal_store.stage(safe_frame)
+                    except api_module.ProposalStoreFull:
+                        await ws.send_text(
+                            json.dumps(
+                                {
+                                    "type": "ERROR",
+                                    "message": "proposal_store_full",
+                                    "proposal_id": proposal_id,
+                                    "room_id": room_id,
+                                }
+                            )
+                        )
+                        continue
+                    await ws.send_text(
+                        json.dumps(
+                            {
+                                "type": "PROPOSAL_STAGED",
+                                "proposal_id": proposal_id,
+                                "room_id": room_id,
+                            }
+                        )
+                    )
+                    continue
+
+                # Harden the call into the HITL engine: coerce types so that a
+                # malformed token cannot raise inside compare_digest or expiry math.
+                # If any token field is present, all must be present and well-formed.
+                if not (
+                    isinstance(token, str)
+                    and token.isascii()
+                    and isinstance(approval_nonce, str)
+                    and isinstance(expiry_epoch, (int, float))
+                    and not isinstance(expiry_epoch, bool)
+                    and isinstance(execution_details, dict)
+                ):
+                    await ws.send_text(
+                        json.dumps(
+                            {
+                                "type": "ERROR",
+                                "message": "proposal_approval_invalid:malformed",
+                                "proposal_id": proposal_id,
+                            }
+                        )
+                    )
+                    continue
+
+                ok, hitl_reason = api_module.hitl_engine.validate(
+                    token=token,
+                    proposal_id=proposal_id,
+                    execution_details=execution_details,
+                    expiry_epoch=expiry_epoch,
+                    nonce=approval_nonce,
+                )
+                if not ok:
+                    await ws.send_text(
+                        json.dumps(
+                            {
+                                "type": "ERROR",
+                                "message": f"proposal_approval_invalid:{hitl_reason}",
+                                "proposal_id": proposal_id,
+                            }
+                        )
+                    )
+                    continue
+                safe_frame["_approval_validated"] = True
+                # Remove from the staging store immediately after validation so
+                # a token consumption is not left dangling if broadcast fails.
+                api_module.proposal_store.remove(proposal_id)
+
+            # Commit the turn only for frames that will actually be broadcast.
+            ok, reason = gateway.security.commit_turn(
+                agent_id=agent_id,
+                room_id=room_id,
+                runtime=frame_runtime,
+                content_type=content_type or "",
+            )
+            if not ok:
+                await ws.send_text(json.dumps({"type": "ERROR", "message": reason}))
+                continue
+
+            try:
+                turn_key = gateway.security.turns._key(room_id, agent_id or "")
+                safe_frame["turn_count"] = int(
+                    gateway.security.turns._credits.get(turn_key, gateway.security.turns.MAX_CREDITS)
+                )
+            except Exception:
+                safe_frame["turn_count"] = 0
+
+            # For rooms still replaying to this socket, route the frame through the
+            # pending queue so history stays in order.
+            if (
+                target_room is not None
+                and ws in target_room._replaying
+                and ws in target_room._pending
+            ):
+                target_room._pending.setdefault(ws, []).append(
+                    (
+                        target_room._seq,
+                        json.dumps(safe_frame, ensure_ascii=False),
+                        bool(safe_frame.get("sender", {}).get("agent_id")),
+                        agent_id,
+                    )
+                )
+                continue
 
             await target_room.broadcast(ws, safe_frame)
 
@@ -715,11 +931,16 @@ async def handle_ws(
 def main() -> None:
     import uvicorn
 
+    # Enforce the same raw-frame cap at the WebSocket transport layer as a
+    # defense-in-depth guard. The receive-loop check already rejects oversized
+    # text, but setting ws_max_size closes the frame at the server before the
+    # application even sees it.
     uvicorn.run(
         "perunchat.gateway:app",
         host=config.api_bind_host(),
         port=config.api_bind_port(),
         reload=False,
+        ws_max_size=MAX_FRAME_BYTES,
     )
 
 

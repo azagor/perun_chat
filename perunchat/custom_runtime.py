@@ -98,7 +98,7 @@ class PerunChatRuntime:
         self.transport.send(frame)
         return frame
 
-    def propose_action(
+    def stage_proposal(
         self,
         room_id: str,
         risk_tier: str,
@@ -107,7 +107,11 @@ class PerunChatRuntime:
         execution_details: Dict[str, Any],
         justification: str,
         thread_id: str = "default",
+        proposal_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """
+        Emit a token-less PERUN_ACTION_PROPOSAL to be staged for approval.
+        """
         self._seq += 1
         frame = {
             "id": f"msg_{uuid.uuid4().hex}",
@@ -124,7 +128,7 @@ class PerunChatRuntime:
             },
             "content_type": "application/perun-proposal",
             "payload": {
-                "proposal_id": f"prop_{uuid.uuid4().hex[:12]}",
+                "proposal_id": proposal_id or f"prop_{uuid.uuid4().hex[:12]}",
                 "proposal_type": "PERUN_ACTION_PROPOSAL",
                 "risk_tier": risk_tier,
                 "action_domain": action_domain,
@@ -138,6 +142,53 @@ class PerunChatRuntime:
         }
         self.transport.send(frame)
         return frame
+
+    def resubmit_with_token(
+        self,
+        staged_frame: Dict[str, Any],
+        approval_token: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Resubmit a previously staged proposal frame with an approval token.
+        """
+        self._seq += 1
+        frame = dict(staged_frame)
+        frame["id"] = f"msg_{uuid.uuid4().hex}"
+        frame["sequence_number"] = self._seq
+        frame["timestamp"] = int(time.time() * 1000)
+        payload = dict(frame.get("payload", {}))
+        payload["approval_token"] = approval_token["token"]
+        payload["approval_expiry_epoch"] = approval_token["expiry_epoch"]
+        payload["approval_nonce"] = approval_token["nonce"]
+        frame["payload"] = payload
+        self.transport.send(frame)
+        return frame
+
+    def propose_action(
+        self,
+        room_id: str,
+        risk_tier: str,
+        action_domain: str,
+        description: str,
+        execution_details: Dict[str, Any],
+        justification: str,
+        thread_id: str = "default",
+        proposal_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Emit a token-less proposal. Use `stage_proposal` and
+        `resubmit_with_token` for the explicit two-phase flow.
+        """
+        return self.stage_proposal(
+            room_id,
+            risk_tier,
+            action_domain,
+            description,
+            execution_details,
+            justification,
+            thread_id,
+            proposal_id,
+        )
 
     def poll(self) -> Optional[Dict[str, Any]]:
         frame = self.transport.receive()

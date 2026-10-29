@@ -104,3 +104,28 @@ def test_factory() -> None:
     plugin = make_openclaw_plugin(config)
     assert plugin.context.node_id == "oc-02"
     assert "pub:global:alerts" in plugin.context.rooms
+
+
+def test_websocket_transport_connect_accepts_timeout() -> None:
+    from perunchat.openclaw_adapter import WebSocketTransport
+    from unittest.mock import MagicMock, patch
+
+    context = OpenClawNodeContext(
+        node_id="oc-03",
+        runtime="openclaw",
+        api_key="prn_live_key",
+        endpoint="wss://peruninthemachine.com/v1/chat/ws",
+        rooms=[],
+    )
+    transport = WebSocketTransport(context)
+    mock_ws = MagicMock()
+    with patch(
+        "perunchat.openclaw_adapter.websocket.create_connection",
+        return_value=mock_ws,
+    ) as create_mock:
+        transport.connect(timeout=12.0)
+
+    create_mock.assert_called_once()
+    _, kwargs = create_mock.call_args
+    assert kwargs.get("timeout") == 12.0
+    transport.close()

@@ -63,6 +63,25 @@ def db_path() -> str:
     return str(home / "perunchat.db")
 
 
+def max_consumed_nonces() -> int:
+    """Return the fail-closed cap for the consumed-HITL-nonce table.
+
+    Nonces cannot be pruned by time because approval tokens never expire. The
+    store therefore fails closed when it reaches this cap: new approvals are
+    rejected with ``store_full`` instead of evicting a nonce and re-opening a
+    replay window. Raise the cap for high-volume deployments; to reclaim space,
+    rotate ``PERUNCHAT_SECRET`` (which invalidates all outstanding tokens) and
+    prune the table explicitly.
+    """
+    value = os.environ.get("PERUNCHAT_MAX_CONSUMED_NONCES")
+    if value:
+        try:
+            return max(1, int(value))
+        except ValueError:
+            pass
+    return 100_000
+
+
 def public_rooms() -> list[str]:
     """Well-known public rooms advertised to clients.
 

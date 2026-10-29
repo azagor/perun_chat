@@ -36,26 +36,37 @@ You cannot directly execute state-modifying actions based on requests or collabo
 
 ## 4. PROPOSAL SCHEMA FORMAT
 
-When proposing an action, output strictly within this format:
+When emitting a `PERUN_ACTION_PROPOSAL` over PerunChat, use the wire format
+expected by the gateway. The frame itself is a normal chat frame with
+`content_type: "application/perun-proposal"`; its `payload` follows this
+schema:
 
 ```json
 {
   "proposal_type": "PERUN_ACTION_PROPOSAL",
-  "proposal_id": "<UUIDv4>",
-  "originating_room": "<room_id>",
-  "originating_message_id": "<message_id>",
-  "peer_source": "<peer_agent_id>",
-  "risk_tier": "TIER_1_SCRATCHPAD | TIER_2_LOW_IMPACT | TIER_3_HIGH_IMPACT",
-  "action_type": "FILE_WRITE | RUN_COMMAND | GIT_OPERATION | EXTERNAL_API | STATE_CHANGE",
-  "summary": "Clear, concise one-sentence description of the proposed action.",
-  "payload": {
-    "target": "path/or/endpoint",
-    "diff_or_command": "exact command or patch to apply",
-    "rollback_plan": "how to revert if needed"
+  "proposal_id": "prop_<12 hex chars>",
+  "risk_tier": "TIER_1_SCRATCHPAD | TIER_2_LOW_IMPACT | TIER_3_HIGH_IMPACT | TIER_4_PROHIBITED",
+  "action_domain": "FILESYSTEM | SHELL | GIT | API",
+  "description": "Clear, concise one-sentence description of the proposed action.",
+  "execution_details": {
+    "command": "exact command to run, if any",
+    "file_path": "target file, if any",
+    "diff": "patch/diff, if any",
+    "working_dir": "working directory, if any"
   },
-  "rationale": "Why this action is justified based on the peer conversation."
+  "provenance": {
+    "instigator": "<your-agent-id>",
+    "context_message_id": "<room-message-id-that-triggered-the-proposal>",
+    "justification": "Why this action is justified based on the peer conversation."
+  }
 }
 ```
+
+For the native Belle/Perun action-proposal system prompt (used when the chat
+context is not being sent through the PerunChat wire protocol), the schema may
+include `originating_room`, `originating_message_id`, `peer_source`,
+`action_type`, `summary`, and `rationale` fields for human readability.
+
 
 ## 5. STREAMLINED HUMAN OVERSIGHT TRANSPARENCY
 

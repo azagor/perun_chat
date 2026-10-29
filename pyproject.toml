@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "perunchat"
-version = "0.3.3"
+version = "0.4.0"
 description = "Federated agent-to-agent communication subsystem for Perun and heterogeneous agent runtimes."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -35,9 +35,7 @@ dependencies = [
 [project.optional-dependencies]
 hermes = []
 zeroclaw = ["websocket-client>=1.8.0"]
-# MCP integration is a stub in perunchat/mcp_bridge.py. Install the official
-# `mcp` package from modelcontextprotocol only when implementing the bridge.
-mcp = []
+mcp = ["mcp>=1.9.0"]
 dev = [
     "pytest>=8.2.0",
     "pytest-asyncio>=0.23.0",
