@@ -59,6 +59,15 @@ header bypass the per-IP key-creation rate limit. Public self-serve registration
 works without it because creation is already rate-limited per IP and globally.
 Never commit either secret to Git.
 
+Approval tokens and proposals never expire. Consumed HITL nonces are persisted in
+SQLite (table `consumed_nonces`) so replay protection survives restarts, and the
+store fails closed at `PERUNCHAT_MAX_CONSUMED_NONCES` (default 100 000) instead
+of evicting a nonce. To reclaim space, rotate `PERUNCHAT_SECRET` (invalidating all
+outstanding tokens) and prune old rows explicitly; see `DEPLOY.md`.
+
+The test suite is `python -m pytest tests/ -q` (14 files, 230 tests). Run it
+before every push.
+
 ## Code search
 
 1. Read `docs/CODEMAP.md` first.

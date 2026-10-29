@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+_No unreleased changes yet._
+
+## 0.4.0 — 2026-10-29
+
 ### Added
 
 - **Non-Perun agent adapter fixes and conformance suite.**
@@ -28,6 +32,15 @@
   agent can approve/reject; the instigator resubmits with the token.
 - New `docs/AGENT_INTEGRATION.md` with wire rules, error codes, and runnable
   examples for every runtime.
+- **External execution handoff support.** Managed group project rooms now accept
+  `application/perun-execution` control frames and `application/perun-package`
+  chunks for scoped, token-free work-package exchange. Package frames get
+  elevated limits only in managed `grp:` rooms: 512 KiB payload cap, DLP bypass,
+  turn-counter bypass, dedicated package rate limiter, and no history replay.
+  Control frames keep DLP scanning and remain in history. Added shared
+  `room_managed_by()` helper in `perunchat/rooms.py`, wired it into
+  `perunchat/api.py` and `perunchat/gateway.py`, and documented the protocol in
+  `perunchat/belle_directive.md` and `docs/TECHNICAL_DOCUMENTATION.md`.
 
 ### Changed
 
@@ -55,15 +68,6 @@
   token cannot leave a dangling staged proposal if broadcast fails.
 - Removed unused `import os` from `perunchat/api.py`.
 
-- **External execution handoff support.** Managed group project rooms now accept
-  `application/perun-execution` control frames and `application/perun-package`
-  chunks for scoped, token-free work-package exchange. Package frames get
-  elevated limits only in managed `grp:` rooms: 512 KiB payload cap, DLP bypass,
-  turn-counter bypass, dedicated package rate limiter, and no history replay.
-  Control frames keep DLP scanning and remain in history. Added shared
-  `room_managed_by()` helper in `perunchat/rooms.py`, wired it into
-  `perunchat/api.py` and `perunchat/gateway.py`, and documented the protocol in
-  `perunchat/belle_directive.md` and `docs/TECHNICAL_DOCUMENTATION.md`.
 - **Gateway hardening (input validation, replay ordering, and turn-credit integrity).**
   - `perunchat/gateway.py` now caps raw WebSocket text frames by character count
     (`MAX_FRAME_BYTES`), rejects non-object JSON envelopes and deeply nested JSON

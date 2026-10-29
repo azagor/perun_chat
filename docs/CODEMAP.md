@@ -10,15 +10,15 @@ Navigation source of truth. Start every lookup here.
 | Agent integration | `docs/AGENT_INTEGRATION.md` | non-Perun agent wire protocol, two-phase HITL, examples | `docs/AGENT_INTEGRATION.md` |
 | Technical spec | `docs/TECHNICAL_DOCUMENTATION.md` | architecture, wire protocol, security model, HITL | `docs/TECHNICAL_DOCUMENTATION.md` |
 | Changelog | `docs/CHANGELOG.md` | release history | `docs/CHANGELOG.md` |
-| Python SDK | `perunchat/client.py` | `PerunChatClient`, `RoomType`, `RiskTier`, reconnect, self-echo filter, two-phase helpers | §7.1 spec, `README.md`, `docs/AGENT_INTEGRATION.md` |
-| Gateway server | `perunchat/gateway.py` | `app`, `ChatGateway`, `handle_ws`, `_effective_runtime`, echo/replay preservation | §2 spec, `docs/TECHNICAL_DOCUMENTATION.md` |
-| API endpoints | `perunchat/api.py` | `router`, key endpoints, `/api/v1/me`, `/api/v1/rooms` (room discovery: persisted memberships + active rooms + `public_rooms()`), availability check | §4/5 spec |
-| Security pipeline | `perunchat/security.py` | `SecurityPipeline`, `DLPScanner`, `RateLimiter`, `AuthRateLimiter`, `SequenceValidator`, `TurnCounter` (per-agent keys, resets on operator/custom/dashboard/human runtimes, prunes stale entries) | §3/5 spec |
-| HITL tokens | `perunchat/hitl.py` | `HITLTokenEngine`, `ApprovalStore` | §5.7 spec |
+| Python SDK | `perunchat/client.py` | `PerunChatClient`, `RoomType`, `RiskTier`, `reconnect`, self-echo filter, `stage_proposal()`, `resubmit_approved_proposal()` | §7.1 spec, `README.md`, `docs/AGENT_INTEGRATION.md` |
+| Gateway server | `perunchat/gateway.py` | `app`, `ChatGateway`, `handle_ws`, `_effective_runtime`, `MAX_FRAME_BYTES`, `_is_managed_project_room`, proposal staging/validation, echo/replay preservation | §2 spec, `docs/TECHNICAL_DOCUMENTATION.md` |
+| API endpoints | `perunchat/api.py` | `router`, key endpoints, `/api/v1/me`, `/api/v1/rooms`, `/api/v1/proposals`, `ProposalStore`, `ProposalStoreFull`, atomic `mark_approved()` | §4/5 spec |
+| Security pipeline | `perunchat/security.py` | `SecurityPipeline`, `DLPScanner`, `RateLimiter`, `AuthRateLimiter`, `SequenceValidator`, `TurnCounter` (per-agent keys, resets on operator/custom/dashboard/human runtimes, prunes stale entries), `pre_validate()` / `commit_turn()` split | §3/5 spec |
+| HITL tokens | `perunchat/hitl.py` | `HITLTokenEngine`, `ApprovalStore` (SQLite-persisted nonces, fail-closed `max_consumed_nonces`), `ApprovalStoreBusy`, `ApprovalStoreFull`, `action_hash()` | §5.5/5.7 spec |
 | Key lifecycle | `perunchat/keys.py` | `KeyStore` (SQLite-backed, in-memory tests) | §4 spec |
-| Persistence | `perunchat/db.py` | `db()` context manager, `init_db()`, WAL mode | §8 spec |
-| Configuration | `perunchat/config.py` | `secret_key()`, `dashboard_secret()`, `db_path()`, `public_rooms()` (`PERUNCHAT_PUBLIC_ROOMS`), env loading | §8 spec |
-| Room taxonomy | `perunchat/rooms.py` | `RoomResolver`, `private_room_id`, `can_join()`, case-insensitive IDs | §2.1/5.3 spec |
+| Persistence | `perunchat/db.py` | `db()` context manager, `init_db()`, WAL mode, `pending_proposals` schema | §8 spec |
+| Configuration | `perunchat/config.py` | `secret_key()`, `dashboard_secret()`, `db_path()`, `public_rooms()` (`PERUNCHAT_PUBLIC_ROOMS`), `max_consumed_nonces()` (`PERUNCHAT_MAX_CONSUMED_NONCES`), env loading | §8 spec |
+| Room taxonomy | `perunchat/rooms.py` | `RoomResolver`, `private_room_id`, `parse_room_id()` (rejects non-strings), `can_join()`, `room_managed_by()`, case-insensitive IDs | §2.1/5.3 spec |
 | Social graph | `perunchat/social.py` | `SocialGraph`, `SocialGraphError` | §5.4 spec |
 | Social dashboard | `perunchat/dashboard/social_manager.html` | `/dashboard/social/` | README |
 | Models | `perunchat/models.py` | `ChatFrame`, `ActionProposal`, `AgentKey` | §2/4/5 spec |
@@ -29,9 +29,9 @@ Navigation source of truth. Start every lookup here.
 | MCP bridge | `perunchat/mcp_bridge.py` | `serve_mcp`, `PerunChatMCPServer`, persistent client, resource reader | §7.4 spec, `docs/AGENT_INTEGRATION.md` |
 | Belle directive | `perunchat/belle_directive.md` | `PERUN_ACTION_PROPOSAL` format + external execution handoff | §6 spec, §6.1 external execution |
 | Deployment | `DEPLOY.md`, `systemd/perunchat.service` | install steps, `EnvironmentFile=/etc/perunchat.env`, Nginx `/chat/` + `/v1/chat/ws` routes, live VPS facts | `DEPLOY.md` |
-| Test suite | `tests/` | `test_api.py`, `test_gateway.py`, `test_social.py`, `test_keys.py`, `test_security.py`, `test_mcp_bridge.py`, `test_adapter_conformance.py`, adapter/model tests — 137 tests | `README.md` |
-| Package init | `perunchat/__init__.py` | exports | `README.md` |
-| Packaging | `pyproject.toml` | dependencies, scripts | `README.md` |
+| Test suite | `tests/` | 14 files, 230 tests: `test_api.py`, `test_gateway.py`, `test_hitl.py`, `test_client.py`, `test_rooms.py`, `test_social.py`, `test_keys.py`, `test_security.py`, `test_models.py`, `test_mcp_bridge.py`, `test_adapter_conformance.py`, `test_custom_runtime.py`, `test_openclaw_adapter.py`, `test_zeroclaw.py` | `README.md` |
+| Package init | `perunchat/__init__.py`, `perunchat/_version.py` | exports, `__version__` (0.4.0) | `README.md` |
+| Packaging | `pyproject.toml` | dependencies, scripts, optional extras (`mcp`, `zeroclaw`, `dev`) | `README.md` |
 
 ## Cross-project relationships
 
