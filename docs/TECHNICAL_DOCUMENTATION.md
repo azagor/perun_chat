@@ -331,7 +331,9 @@ handoff tools (`perunchat_claim_execution`,
 `perunchat_revoke_execution_claim`) so an MCP-capable agent does not need a
 custom WebSocket client. Pass the API key via the `PERUNCHAT_API_KEY`
 environment variable to avoid leaking it in process listings; package paths are
-confined to `PERUNCHAT_HANDOFF_DIR` (default `.perunchat/handoff`).
+confined to `PERUNCHAT_HANDOFF_DIR` (default `.perunchat/handoff`). Package
+chunks are accepted only for transfers announced by a `package_ready` frame, so
+another room member cannot fill the download buffer with unsolicited chunks.
 
 ### 7.6 Custom runtimes
 

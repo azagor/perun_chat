@@ -25,6 +25,7 @@ import io
 import json
 import os
 import sys
+import time
 import uuid
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -76,6 +77,8 @@ class PerunChatMCPServer:
         self._package_bytes: Dict[str, int] = {}
         self._package_total_bytes = 0
         self._package_errors: Dict[str, str] = {}
+        # Only buffer chunks for transfers Perun announced via package_ready.
+        self._expected_downloads: Dict[str, float] = {}
 
     async def _ensure_client(self) -> Any:
         """Lazy import and connect the async Python SDK."""
@@ -102,36 +105,51 @@ class PerunChatMCPServer:
         self._RoomType = RoomType
         self._RiskTier = RiskTier
 
-        def _store_message(frame: Dict[str, Any]) -> None:
-            content_type = frame.get("content_type")
-            if content_type == self._PACKAGE_CONTENT_TYPE:
-                self._buffer_package_frame(frame)
-                return
-            if content_type in (
-                self._EXECUTION_CONTENT_TYPE,
-                self._EXECUTION_RESULT_CONTENT_TYPE,
-            ):
-                self._control_seq += 1
-                stored = dict(frame)
-                stored["_mcp_seq"] = self._control_seq
-                self._control_frames.append(stored)
-                if len(self._control_frames) > self._MAX_CONTROL_FRAMES:
-                    del self._control_frames[: len(self._control_frames) - self._MAX_CONTROL_FRAMES]
-                return
-            room_id = frame.get("room_id")
-            if room_id:
-                self._room_messages.setdefault(room_id, []).append(frame)
-                # Bound memory per room.
-                self._room_messages[room_id] = self._room_messages[room_id][-500:]
-
-        self._client.on_message(_store_message)
+        self._client.on_message(self._on_frame)
         await self._client.connect()
         return self._client
+
+    def _on_frame(self, frame: Dict[str, Any]) -> None:
+        content_type = frame.get("content_type")
+        if content_type == self._PACKAGE_CONTENT_TYPE:
+            self._buffer_package_frame(frame)
+            return
+        if content_type in (
+            self._EXECUTION_CONTENT_TYPE,
+            self._EXECUTION_RESULT_CONTENT_TYPE,
+        ):
+            payload = frame.get("payload") or {}
+            if (
+                content_type == self._EXECUTION_CONTENT_TYPE
+                and payload.get("op") == "package_ready"
+                and payload.get("transfer_id")
+            ):
+                transfer_id = str(payload["transfer_id"])
+                self._expected_downloads[transfer_id] = time.time()
+                if len(self._expected_downloads) > self._MAX_PACKAGE_TRANSFERS:
+                    oldest = min(
+                        self._expected_downloads,
+                        key=self._expected_downloads.get,
+                    )
+                    self._expected_downloads.pop(oldest, None)
+            self._control_seq += 1
+            stored = dict(frame)
+            stored["_mcp_seq"] = self._control_seq
+            self._control_frames.append(stored)
+            if len(self._control_frames) > self._MAX_CONTROL_FRAMES:
+                del self._control_frames[: len(self._control_frames) - self._MAX_CONTROL_FRAMES]
+            return
+        room_id = frame.get("room_id")
+        if room_id:
+            self._room_messages.setdefault(room_id, []).append(frame)
+            # Bound memory per room.
+            self._room_messages[room_id] = self._room_messages[room_id][-500:]
 
     def _drop_package(self, transfer_id: str) -> None:
         self._package_chunks.pop(transfer_id, None)
         self._package_total_bytes -= self._package_bytes.pop(transfer_id, 0)
         self._package_errors.pop(transfer_id, None)
+        self._expected_downloads.pop(transfer_id, None)
         self._package_total_bytes = max(0, self._package_total_bytes)
 
     def _buffer_package_frame(self, frame: Dict[str, Any]) -> None:
@@ -142,6 +160,11 @@ class PerunChatMCPServer:
         if not transfer_id or not isinstance(seq, int) or isinstance(seq, bool):
             return
         if not isinstance(data, str):
+            return
+        # Chunks are only accepted after Perun's package_ready for this
+        # transfer. This stops another room member from filling the download
+        # buffer with unsolicited (or spoofed) chunk frames.
+        if transfer_id not in self._expected_downloads:
             return
         if (
             transfer_id not in self._package_chunks

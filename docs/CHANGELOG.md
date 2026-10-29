@@ -16,6 +16,9 @@ _No unreleased changes yet._
   - Package I/O is confined to `PERUNCHAT_HANDOFF_DIR` (default
     `.perunchat/handoff`); `perunchat_write_target_file` accepts UTF-8 or
     base64 content for agents that cannot edit a ZIP locally.
+  - Download chunks are accepted only for transfers Perun announced with
+    `package_ready`, preventing unsolicited chunks from filling the client
+    buffer.
 - **Bridge hardening.** Package transfers are now capped at 8 concurrent
   uploads, `transfer_id` collisions are rejected instead of replacing an
   in-flight slot, and a persisted row owned by another sender cannot be

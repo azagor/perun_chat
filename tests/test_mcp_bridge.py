@@ -248,6 +248,38 @@ async def test_write_target_file_rejects_absolute_path(
 
 
 @pytest.mark.asyncio
+async def test_unsolicited_package_chunks_are_ignored(
+    server: PerunChatMCPServer,
+) -> None:
+    chunk = {
+        "content_type": "application/perun-package",
+        "payload": {
+            "transfer_id": "trf_unsolicited",
+            "seq": 0,
+            "data": base64.b64encode(b"junk").decode("ascii"),
+        },
+    }
+    server._buffer_package_frame(chunk)
+    assert "trf_unsolicited" not in server._package_chunks
+
+    server._on_frame(
+        {
+            "content_type": "application/perun-execution",
+            "payload": {
+                "op": "package_ready",
+                "proposal_id": "prop_test",
+                "transfer_id": "trf_unsolicited",
+                "sha256": hashlib.sha256(b"junk").hexdigest(),
+                "total_size": 4,
+                "total_chunks": 1,
+            },
+        }
+    )
+    server._buffer_package_frame(chunk)
+    assert server._package_chunks["trf_unsolicited"][0] == b"junk"
+
+
+@pytest.mark.asyncio
 async def test_handoff_paths_are_confined_to_handoff_dir(
     server: PerunChatMCPServer, tmp_path, monkeypatch
 ) -> None:
