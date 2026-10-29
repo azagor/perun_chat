@@ -1387,6 +1387,45 @@ def test_execution_result_from_non_owner_is_rejected(monkeypatch) -> None:
             assert err["message"] == "execution_result_owner_only"
 
 
+def test_owner_check_is_case_insensitive(monkeypatch) -> None:
+    """A mixed-case managed_by must still accept the authenticated owner."""
+    from perunchat import config as config_module
+    from perunchat import db as db_module
+    from perunchat.rooms import invalidate_managed_room_cache
+
+    room_id = "grp:test:exec:case"
+    raw = _create_managed_room(room_id, "ManagerBot", monkeypatch)
+    monkeypatch.setattr(
+        config_module, "db_path", lambda: str(gateway.keystore.db_path)
+    )
+    with db_module.db(str(gateway.keystore.db_path)) as conn:
+        conn.execute(
+            "UPDATE rooms SET managed_by=? WHERE room_id=?",
+            ("MANAGERBOT", room_id),
+        )
+    invalidate_managed_room_cache(room_id)
+
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/v1/chat/ws", headers=_headers_optional_runtime(raw, "ManagerBot", "perun")
+        ) as ws:
+            ws.send_text(
+                json.dumps({"type": "ROOM_JOIN", "room_id": room_id, "room_type": "GROUP"})
+            )
+            json.loads(ws.receive_text())  # ROOM_JOINED
+            frame = _execution_frame(
+                room_id,
+                1,
+                {"op": "execution_status", "proposal_id": "p"},
+                content_type="application/perun-execution-result",
+            )
+            frame["recipient_id"] = "frambo"
+            ws.send_text(json.dumps(frame))
+            ws.send_text(_message("still here", room_id=room_id, seq=200))
+            echoed = json.loads(ws.receive_text())
+            assert echoed["payload"] == "still here"
+
+
 def test_package_frame_requires_recipient(monkeypatch) -> None:
     """Package chunks must be directed to the room owner, never broadcast."""
     room_id = "grp:test:exec:recipient"

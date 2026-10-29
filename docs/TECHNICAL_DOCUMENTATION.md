@@ -375,6 +375,10 @@ was lost. `transfer_id` values are unique while in flight; a second
 `package_begin` for an existing id is rejected instead of replacing the slot,
 and at most 8 uploads may be open at once.
 
+If the response to `package_begin` is lost, do not retry the same id: issue a
+new `package_begin` with a fresh `transfer_id`. The old slot expires after the
+30-minute TTL and counts against the 8-transfer cap until then.
+
 Package limits (Perun-side defaults): 50 MB uncompressed total, 500 entries,
 10 MB per entry, 360 KiB raw chunks, 60-minute claim TTL, 30-minute transfer
 TTL.

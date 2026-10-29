@@ -362,6 +362,34 @@ async def test_download_sha_mismatch_removes_partial(
 
 
 @pytest.mark.asyncio
+async def test_owner_is_tracked_per_room(server: PerunChatMCPServer) -> None:
+    _install_client(server, AsyncMock(return_value={}))
+    for room_id, owner in (("grp:a", "owner-a"), ("grp:b", "owner-b")):
+        server._on_frame(
+            {
+                "room_id": room_id,
+                "content_type": "application/perun-execution-result",
+                "sender": {"agent_id": owner, "runtime": "perun"},
+                "payload": {"op": "execution_status", "ok": True},
+            }
+        )
+    assert server._perun_agent_ids["grp:a"] == "owner-a"
+    assert server._perun_agent_ids["grp:b"] == "owner-b"
+
+    client = server._client
+    await server._send_execution(
+        client, "grp:a", server._RoomType.GROUP, {"op": "execution_status"}
+    )
+    await server._send_execution(
+        client, "grp:b", server._RoomType.GROUP, {"op": "execution_status"}
+    )
+    recipients = [
+        call.kwargs.get("recipient_id") for call in client.send_frame.await_args_list
+    ]
+    assert recipients == ["owner-a", "owner-b"]
+
+
+@pytest.mark.asyncio
 async def test_transfer_status_returns_payload(server: PerunChatMCPServer) -> None:
     async def send(room_id, room_type, content_type, payload, **kwargs):
         _push_control(

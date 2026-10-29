@@ -4,6 +4,17 @@
 
 _No unreleased changes yet._
 
+## 0.4.5 - 2026-10-29
+
+### Fixed
+
+- **Per-room download serialization.** Downloads for different proposals no
+  longer block each other; each proposal has its own lock.
+- **Mixed-case owner coverage.** Added a gateway test for a `managed_by` value
+  whose case differs from the authenticated owner id.
+- **Two-room owner isolation.** The MCP bridge now tracks the Perun owner per
+  room and a test verifies directed frames use the right owner.
+
 ## 0.4.4 - 2026-10-29
 
 ### Fixed

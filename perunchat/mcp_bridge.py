@@ -69,7 +69,7 @@ class PerunChatMCPServer:
         self._RoomType: Any = None
         self._RiskTier: Any = None
         self._perun_agent_ids: Dict[str, str] = {}
-        self._download_lock = asyncio.Lock()
+        self._download_locks: Dict[str, asyncio.Lock] = {}
         self._room_messages: Dict[str, List[Dict[str, Any]]] = {}
         # Control/result frames and package chunks are kept separately so the
         # chat resource stays small and chunks do not evict recent messages.
@@ -223,6 +223,13 @@ class PerunChatMCPServer:
         if candidate != root and root not in candidate.parents:
             raise ValueError(f"handoff path must be inside {root}")
         return candidate
+
+    def _download_lock_for(self, proposal_id: str) -> asyncio.Lock:
+        lock = self._download_locks.get(proposal_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._download_locks[proposal_id] = lock
+        return lock
 
     async def _join_room(self, client: Any, room_id: str, room_type: Any) -> None:
         joined = getattr(client, "_joined_rooms", None)
@@ -803,10 +810,10 @@ class PerunChatMCPServer:
                 )
                 return _result_response(payload)
             if name == "perunchat_request_download_package":
-                async with self._download_lock:
-                    proposal_id = str(arguments.get("proposal_id") or "").strip()
-                    if not proposal_id:
-                        return _err("proposal_id is required")
+                proposal_id = str(arguments.get("proposal_id") or "").strip()
+                if not proposal_id:
+                    return _err("proposal_id is required")
+                async with self._download_lock_for(proposal_id):
                     raw_destination = arguments.get("destination")
                     try:
                         destination = self._resolve_handoff_path(

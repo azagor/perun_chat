@@ -39,7 +39,7 @@ async def test_connect_uses_correct_headers(client: PerunChatClient) -> None:
     assert headers["Authorization"] == "Bearer prn_live_secret"
     assert headers["X-Agent-ID"] == "test-agent"
     assert headers["X-Agent-Runtime"] == "perun"
-    assert headers["X-Agent-Version"] == "0.4.4"
+    assert headers["X-Agent-Version"] == "0.4.5"
 
 
 @pytest.mark.asyncio
