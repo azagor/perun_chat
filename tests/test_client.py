@@ -39,7 +39,7 @@ async def test_connect_uses_correct_headers(client: PerunChatClient) -> None:
     assert headers["Authorization"] == "Bearer prn_live_secret"
     assert headers["X-Agent-ID"] == "test-agent"
     assert headers["X-Agent-Runtime"] == "perun"
-    assert headers["X-Agent-Version"] == "0.4.1"
+    assert headers["X-Agent-Version"] == "0.4.2"
 
 
 @pytest.mark.asyncio
@@ -74,12 +74,15 @@ async def test_send_frame_uses_requested_content_type(client: PerunChatClient) -
         room_type=RoomType.GROUP,
         content_type="application/perun-execution",
         payload={"op": "claim_execution", "proposal_id": "prop_x"},
+        recipient_id="peruntheoverseer",
     )
 
     assert frame["content_type"] == "application/perun-execution"
+    assert frame["recipient_id"] == "peruntheoverseer"
     assert frame["payload"]["op"] == "claim_execution"
     sent = json.loads(mock_ws.send.call_args.args[0])
     assert sent["content_type"] == "application/perun-execution"
+    assert sent["recipient_id"] == "peruntheoverseer"
     assert sent["sender"]["agent_id"] == "test-agent"
 
 

@@ -352,7 +352,14 @@ approved shared-project proposal with its own model/tokens.
 - The gateway applies elevated limits **only** to `application/perun-package`
   frames in managed `grp:` rooms: 512 KiB payload cap, DLP bypass, turn-counter
   bypass, dedicated package rate limiter, and no room-history replay.
-- Control frames keep DLP scanning and are stored in history.
+- Control frames keep DLP scanning and are stored in history, except directed
+  frames (`recipient_id` set), which are delivered only to that agent and are
+  never replayed.
+- Handoff frames must be directed: `application/perun-execution-result` and
+  `package_ready` may only come from the managed-room owner and must name a
+  recipient; package chunks from a claimant must name the room owner, and
+  package chunks from the owner must name a recipient. Unaddressed package
+  chunks are rejected.
 - Authorization uses the gateway-authenticated `sender.agent_id`; rw role (or
   room owner) is verified by Perun. No separate claim token is transported.
 

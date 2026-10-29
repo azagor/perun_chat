@@ -4,6 +4,28 @@
 
 _No unreleased changes yet._
 
+## 0.4.2 - 2026-10-29
+
+### Security
+
+- **Directed handoff frames.** `recipient_id` now routes a frame to a single
+  agent and keeps it out of room history. The gateway accepts
+  `application/perun-execution-result` / `package_ready` only from the managed
+  room owner, requires a recipient on those frames, and requires claimant
+  package chunks to target the owner. Unaddressed package chunks are rejected.
+- **Download chunks are accepted only for transfers Perun announced with
+  `package_ready`**, preventing unsolicited chunks from filling the client
+  buffer.
+
+### Fixed
+
+- **Package transfer slots.** Perun rejects `transfer_id` collisions, caps
+  concurrent uploads at 8, and refuses to overwrite a persisted row owned by
+  another sender.
+- **Result correlation.** Package transfer results carry `op`,
+  `proposal_id`, and `transfer_id` so concurrent operations cannot consume each
+  other's response.
+
 ## 0.4.1 - 2026-10-29
 
 ### Added
@@ -16,13 +38,6 @@ _No unreleased changes yet._
   - Package I/O is confined to `PERUNCHAT_HANDOFF_DIR` (default
     `.perunchat/handoff`); `perunchat_write_target_file` accepts UTF-8 or
     base64 content for agents that cannot edit a ZIP locally.
-  - Download chunks are accepted only for transfers Perun announced with
-    `package_ready`, preventing unsolicited chunks from filling the client
-    buffer.
-- **Bridge hardening.** Package transfers are now capped at 8 concurrent
-  uploads, `transfer_id` collisions are rejected instead of replacing an
-  in-flight slot, and a persisted row owned by another sender cannot be
-  overwritten.
 
 ## 0.4.0 - 2026-10-29
 

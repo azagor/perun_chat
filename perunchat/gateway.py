@@ -52,9 +52,11 @@ MAX_FRAME_BYTES = _PACKAGE_MAX_PAYLOAD_BYTES + 16_384
 # Per-socket send timeout so one stalled client cannot block the whole room.
 _SEND_TIMEOUT = 5.0
 _PACKAGE_CONTENT_TYPE = "application/perun-package"
+_EXECUTION_CONTENT_TYPE = "application/perun-execution"
+_EXECUTION_RESULT_CONTENT_TYPE = "application/perun-execution-result"
 _EXECUTION_CONTENT_TYPES = {
-    "application/perun-execution",
-    "application/perun-execution-result",
+    _EXECUTION_CONTENT_TYPE,
+    _EXECUTION_RESULT_CONTENT_TYPE,
     _PACKAGE_CONTENT_TYPE,
 }
 
@@ -129,21 +131,27 @@ class Room:
 
     async def broadcast(self, sender: WebSocket, frame: Dict[str, Any]) -> None:
         sender_agent_id = self.connections.get(sender)
+        recipient_id = str(frame.get("recipient_id") or "").strip()
+        directed = bool(recipient_id)
         message = json.dumps(frame, ensure_ascii=False)
         self._seq += 1
         seq = self._seq
         # Only store real chat frames for late-joiners; ephemeral control frames
-        # such as PRESENCE_UPDATE should not be replayed. Store a deep copy so
-        # any later mutation of the broadcast frame cannot corrupt the replay
-        # buffer, and preserve the original sender (including runtime) exactly.
+        # such as PRESENCE_UPDATE should not be replayed. Directed execution
+        # frames are never stored so another member cannot replay them later.
+        # Store a deep copy so any later mutation of the broadcast frame cannot
+        # corrupt the replay buffer, and preserve the original sender exactly.
         stored = bool(
             (frame.get("sender") or {}).get("agent_id")
             and frame.get("content_type") != _PACKAGE_CONTENT_TYPE
+            and not directed
         )
         if stored:
             self._history.append((seq, copy.deepcopy(frame)))
         targets: list[WebSocket] = []
         for conn, recipient_agent_id in list(self.connections.items()):
+            if directed and recipient_agent_id != recipient_id:
+                continue
             if self._blocked(recipient_agent_id, sender_agent_id):
                 continue
             if conn in self._replaying:
@@ -689,6 +697,81 @@ async def handle_ws(
                     )
                 )
                 continue
+
+            if is_managed_room:
+                owner_id = room_managed_by(room_id) or ""
+                recipient_id = str(frame.get("recipient_id") or "").strip()
+                payload_obj = frame.get("payload") or {}
+                if content_type == _EXECUTION_RESULT_CONTENT_TYPE:
+                    if not owner_id or agent_id != owner_id:
+                        await ws.send_text(
+                            json.dumps(
+                                {
+                                    "type": "ERROR",
+                                    "message": "execution_result_owner_only",
+                                    "room_id": room_id,
+                                }
+                            )
+                        )
+                        continue
+                    if not recipient_id:
+                        await ws.send_text(
+                            json.dumps(
+                                {
+                                    "type": "ERROR",
+                                    "message": "execution_result_recipient_required",
+                                    "room_id": room_id,
+                                }
+                            )
+                        )
+                        continue
+                elif content_type == _EXECUTION_CONTENT_TYPE:
+                    if payload_obj.get("op") == "package_ready":
+                        if not owner_id or agent_id != owner_id:
+                            await ws.send_text(
+                                json.dumps(
+                                    {
+                                        "type": "ERROR",
+                                        "message": "package_ready_owner_only",
+                                        "room_id": room_id,
+                                    }
+                                )
+                            )
+                            continue
+                        if not recipient_id:
+                            await ws.send_text(
+                                json.dumps(
+                                    {
+                                        "type": "ERROR",
+                                        "message": "package_ready_recipient_required",
+                                        "room_id": room_id,
+                                    }
+                                )
+                            )
+                            continue
+                elif content_type == _PACKAGE_CONTENT_TYPE:
+                    if not recipient_id:
+                        await ws.send_text(
+                            json.dumps(
+                                {
+                                    "type": "ERROR",
+                                    "message": "package_recipient_required",
+                                    "room_id": room_id,
+                                }
+                            )
+                        )
+                        continue
+                    if owner_id and agent_id != owner_id and recipient_id != owner_id:
+                        await ws.send_text(
+                            json.dumps(
+                                {
+                                    "type": "ERROR",
+                                    "message": "package_recipient_must_be_owner",
+                                    "room_id": room_id,
+                                }
+                            )
+                        )
+                        continue
 
             # Reject oversized payloads before any further processing.
             payload = frame.get("payload")

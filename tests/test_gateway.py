@@ -1256,7 +1256,12 @@ def _create_managed_room(room_id: str, managed_by: str, monkeypatch) -> str:
     return raw
 
 
-def _execution_frame(room_id: str, seq: int, payload: dict) -> dict:
+def _execution_frame(
+    room_id: str,
+    seq: int,
+    payload: dict,
+    content_type: str = "application/perun-execution",
+) -> dict:
     import time
     return {
         "id": f"exec_{seq}",
@@ -1267,15 +1272,21 @@ def _execution_frame(room_id: str, seq: int, payload: dict) -> dict:
         "room_type": "GROUP",
         "room_id": room_id,
         "sender": {"agent_id": "manager", "runtime": "perun"},
-        "content_type": "application/perun-execution",
+        "content_type": content_type,
         "turn_count": 0,
         "payload": payload,
     }
 
 
-def _package_frame(room_id: str, seq: int, transfer_id: str, data: str) -> dict:
+def _package_frame(
+    room_id: str,
+    seq: int,
+    transfer_id: str,
+    data: str,
+    recipient_id: str | None = None,
+) -> dict:
     import time
-    return {
+    frame = {
         "id": f"pkg_{seq}",
         "trace_id": "trc_pkg",
         "thread_id": "default",
@@ -1288,6 +1299,9 @@ def _package_frame(room_id: str, seq: int, transfer_id: str, data: str) -> dict:
         "turn_count": 0,
         "payload": {"transfer_id": transfer_id, "seq": seq, "total_chunks": 1, "data": data},
     }
+    if recipient_id:
+        frame["recipient_id"] = recipient_id
+    return frame
 
 
 def test_execution_frames_rejected_in_public_room() -> None:
@@ -1337,6 +1351,153 @@ def test_package_frames_rejected_in_unmanaged_group_room() -> None:
             err = json.loads(ws.receive_text())
             assert err["type"] == "ERROR"
             assert err["message"] == "package_frames_project_rooms_only"
+
+
+def test_execution_result_from_non_owner_is_rejected(monkeypatch) -> None:
+    """Only the managed-room owner may send execution-result frames."""
+    room_id = "grp:test:exec:owner-only"
+    _create_managed_room(room_id, "manager", monkeypatch)
+    raw, _ = gateway.keystore.create(
+        owner_id="owner-frambo",
+        agent_id="frambo",
+        supported_runtime="custom",
+        scopes=["grp:test:*"],
+    )
+    gateway.rooms.add_member(room_id, "frambo")
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/v1/chat/ws", headers=_headers_optional_runtime(raw, "frambo", "custom")
+        ) as ws:
+            ws.send_text(
+                json.dumps({"type": "ROOM_JOIN", "room_id": room_id, "room_type": "GROUP"})
+            )
+            json.loads(ws.receive_text())  # ROOM_JOINED
+            ws.send_text(
+                json.dumps(
+                    _execution_frame(
+                        room_id,
+                        1,
+                        {"op": "claim_execution", "proposal_id": "prop_x"},
+                        content_type="application/perun-execution-result",
+                    )
+                )
+            )
+            err = json.loads(ws.receive_text())
+            assert err["type"] == "ERROR"
+            assert err["message"] == "execution_result_owner_only"
+
+
+def test_package_frame_requires_recipient(monkeypatch) -> None:
+    """Package chunks must be directed to the room owner, never broadcast."""
+    room_id = "grp:test:exec:recipient"
+    _create_managed_room(room_id, "manager", monkeypatch)
+    raw, _ = gateway.keystore.create(
+        owner_id="owner-frambo",
+        agent_id="frambo",
+        supported_runtime="custom",
+        scopes=["grp:test:*"],
+    )
+    gateway.rooms.add_member(room_id, "frambo")
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/v1/chat/ws", headers=_headers_optional_runtime(raw, "frambo", "custom")
+        ) as ws:
+            ws.send_text(
+                json.dumps({"type": "ROOM_JOIN", "room_id": room_id, "room_type": "GROUP"})
+            )
+            json.loads(ws.receive_text())  # ROOM_JOINED
+            ws.send_text(json.dumps(_package_frame(room_id, 1, "trf_x", "Zg==")))
+            err = json.loads(ws.receive_text())
+            assert err["type"] == "ERROR"
+            assert err["message"] == "package_recipient_required"
+
+
+def test_package_frame_must_target_owner(monkeypatch) -> None:
+    """A claimant cannot direct file chunks to another room member."""
+    room_id = "grp:test:exec:target"
+    _create_managed_room(room_id, "manager", monkeypatch)
+    raw, _ = gateway.keystore.create(
+        owner_id="owner-frambo",
+        agent_id="frambo",
+        supported_runtime="custom",
+        scopes=["grp:test:*"],
+    )
+    gateway.rooms.add_member(room_id, "frambo")
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/v1/chat/ws", headers=_headers_optional_runtime(raw, "frambo", "custom")
+        ) as ws:
+            ws.send_text(
+                json.dumps({"type": "ROOM_JOIN", "room_id": room_id, "room_type": "GROUP"})
+            )
+            json.loads(ws.receive_text())  # ROOM_JOINED
+            ws.send_text(
+                json.dumps(
+                    _package_frame(
+                        room_id, 1, "trf_x", "Zg==", recipient_id="someone-else"
+                    )
+                )
+            )
+            err = json.loads(ws.receive_text())
+            assert err["type"] == "ERROR"
+            assert err["message"] == "package_recipient_must_be_owner"
+
+
+def test_package_frame_to_owner_is_accepted(monkeypatch) -> None:
+    """Chunks directed to the managed-room owner are accepted."""
+    room_id = "grp:test:exec:ok"
+    _create_managed_room(room_id, "manager", monkeypatch)
+    raw, _ = gateway.keystore.create(
+        owner_id="owner-frambo",
+        agent_id="frambo",
+        supported_runtime="custom",
+        scopes=["grp:test:*"],
+    )
+    gateway.rooms.add_member(room_id, "frambo")
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/v1/chat/ws", headers=_headers_optional_runtime(raw, "frambo", "custom")
+        ) as ws:
+            ws.send_text(
+                json.dumps({"type": "ROOM_JOIN", "room_id": room_id, "room_type": "GROUP"})
+            )
+            json.loads(ws.receive_text())  # ROOM_JOINED
+            ws.send_text(
+                json.dumps(
+                    _package_frame(
+                        room_id, 1, "trf_x", "Zg==", recipient_id="manager"
+                    )
+                )
+            )
+            # No error: send a normal chat frame and confirm the connection
+            # is still healthy.
+            ws.send_text(_message("still here", room_id=room_id, seq=200))
+            echoed = json.loads(ws.receive_text())
+            assert echoed["payload"] == "still here"
+
+
+def test_directed_frame_only_reaches_recipient(monkeypatch) -> None:
+    """Directed frames never reach other members and are not replayed."""
+    room = _room(monkeypatch, n=0)
+
+    async def scenario() -> tuple[FakeWS, FakeWS, FakeWS]:
+        alice, bob = FakeWS(), FakeWS()
+        await room.join(alice, "alice")
+        await room.join(bob, "bob")
+        await room.replay_history(alice, "alice")
+        await room.replay_history(bob, "bob")
+        frame = _frame(1, content_type="application/perun-execution-result")
+        frame["recipient_id"] = "bob"
+        await room.broadcast(alice, frame)
+        late = FakeWS()
+        await room.join(late, "late")
+        await room.replay_history(late, "late")
+        return alice, bob, late
+
+    alice, bob, late = asyncio.run(scenario())
+    assert [f["id"] for f in bob.sent] == ["m1"]
+    assert alice.sent == []
+    assert late.sent == []
 
 
 def test_room_managed_by_uses_short_lived_cache(tmp_path, monkeypatch) -> None:
@@ -1393,7 +1554,13 @@ def test_package_frames_accepted_in_managed_group_room(monkeypatch) -> None:
 
             # A package frame is accepted even though it is > normal 8 KiB limit.
             big_data = "a" * (10 * 1024)
-            ws.send_text(json.dumps(_package_frame(room_id, 2, "trf_2", big_data)))
+            ws.send_text(
+                json.dumps(
+                    _package_frame(
+                        room_id, 2, "trf_2", big_data, recipient_id="manager"
+                    )
+                )
+            )
             echo = json.loads(ws.receive_text())
             assert echo["content_type"] == "application/perun-package"
             assert echo["payload"]["data"] == big_data
@@ -1408,7 +1575,13 @@ def test_package_frames_accepted_in_managed_group_room(monkeypatch) -> None:
             assert "[REDACTED_SECRET]" in echo["payload"]["text"]
             assert secret not in echo["payload"]["text"]
 
-            ws.send_text(json.dumps(_package_frame(room_id, 104, "trf_3", secret)))
+            ws.send_text(
+                json.dumps(
+                    _package_frame(
+                        room_id, 104, "trf_3", secret, recipient_id="manager"
+                    )
+                )
+            )
             echo = json.loads(ws.receive_text())
             assert echo["content_type"] == "application/perun-package"
             assert echo["payload"]["data"] == secret

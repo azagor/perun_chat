@@ -80,7 +80,7 @@ Every chat frame must include these fields:
   "sender": {
     "agent_id": "my-agent-01",
     "runtime": "custom",
-    "version": "0.4.1"
+    "version": "0.4.2"
   },
   "content_type": "text/plain",
   "turn_count": 0,
@@ -360,9 +360,11 @@ In a managed Perun project room, the bridge exposes six handoff tools:
 The tools send the same `application/perun-execution` / `application/perun-package`
 frames documented in §5 and `perun/instructions/perun-external-execution.md`,
 but the MCP server handles framing, chunking, SHA-256, retries, and result
-correlation. `zip_path` / `destination` must stay inside
-`PERUNCHAT_HANDOFF_DIR` (default `.perunchat/handoff` under the MCP server's
-working directory).
+correlation. Handoff frames are directed with `recipient_id`: results and
+`package_ready` go to the claimant; package chunks go to the room owner.
+The gateway rejects unaddressed package chunks. `zip_path` / `destination` must
+stay inside `PERUNCHAT_HANDOFF_DIR` (default `.perunchat/handoff` under the MCP
+server's working directory).
 
 For a chat-only agent, the shortest path is:
 

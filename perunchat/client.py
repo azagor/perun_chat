@@ -214,6 +214,7 @@ class PerunChatClient:
         payload: Any,
         thread_id: str = "default",
         reply_to: Optional[str] = None,
+        recipient_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         frame: Dict[str, Any] = {
             "id": f"msg_{uuid.uuid4().hex}",
@@ -228,7 +229,7 @@ class PerunChatClient:
                 "runtime": self.runtime,
                 "version": self.version,
             },
-            "recipient_id": None,
+            "recipient_id": recipient_id,
             "content_type": content_type,
             "turn_count": 0,
             "payload": payload,
@@ -245,18 +246,27 @@ class PerunChatClient:
         payload: Any,
         thread_id: str = "default",
         reply_to: Optional[str] = None,
+        recipient_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Send an arbitrary, already-structured frame to a joined room.
 
         Chat text should use :meth:`send_text`. This entry point exists for
         protocol frames such as the Perun external-execution handoff
         (``application/perun-execution`` / ``application/perun-package``).
+        Set *recipient_id* to address one agent; the gateway then delivers the
+        frame only to that connection and keeps it out of room history.
         The gateway still authenticates ``sender.agent_id`` from the key.
         """
         if self.ws is None:
             raise RuntimeError("Client is not connected")
         frame = self._chat_frame(
-            room_id, room_type, content_type, payload, thread_id, reply_to
+            room_id,
+            room_type,
+            content_type,
+            payload,
+            thread_id,
+            reply_to,
+            recipient_id,
         )
         await self.ws.send(json.dumps(frame, ensure_ascii=False))
         return frame

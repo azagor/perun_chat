@@ -65,19 +65,18 @@ def _zip_bytes(path: str, body: bytes) -> bytes:
 def _push_control(
     server: PerunChatMCPServer, content_type: str, payload: dict
 ) -> None:
-    server._control_seq += 1
-    server._control_frames.append(
+    server._on_frame(
         {
             "content_type": content_type,
             "payload": payload,
-            "_mcp_seq": server._control_seq,
+            "sender": {"agent_id": "peruntheoverseer", "runtime": "perun"},
         }
     )
 
 
 @pytest.mark.asyncio
 async def test_claim_execution_waits_for_result(server: PerunChatMCPServer) -> None:
-    async def send(room_id, room_type, content_type, payload):
+    async def send(room_id, room_type, content_type, payload, **kwargs):
         assert content_type == "application/perun-execution"
         _push_control(
             server,
@@ -98,6 +97,7 @@ async def test_claim_execution_waits_for_result(server: PerunChatMCPServer) -> N
     )
     assert result["isError"] is False
     assert '"status": "claimed"' in result["content"][0]["text"]
+    assert server._perun_agent_id == "peruntheoverseer"
 
 
 @pytest.mark.asyncio
@@ -111,7 +111,7 @@ async def test_download_package_writes_verified_zip(
     server._package_chunks[transfer_id] = {0: archive}
     server._package_bytes[transfer_id] = len(archive)
 
-    async def send(room_id, room_type, content_type, payload):
+    async def send(room_id, room_type, content_type, payload, **kwargs):
         assert payload["op"] == "request_download_package"
         _push_control(
             server,
@@ -154,8 +154,14 @@ async def test_upload_package_sends_begin_chunks_end(
     package_path.write_bytes(archive)
     frames: list[dict] = []
 
-    async def send(room_id, room_type, content_type, payload):
-        frames.append({"content_type": content_type, "payload": payload})
+    async def send(room_id, room_type, content_type, payload, **kwargs):
+        frames.append(
+            {
+                "content_type": content_type,
+                "payload": payload,
+                "recipient_id": kwargs.get("recipient_id"),
+            }
+        )
         if payload.get("op") == "package_begin":
             _push_control(
                 server,
@@ -181,6 +187,7 @@ async def test_upload_package_sends_begin_chunks_end(
         return {}
 
     _install_client(server, send)
+    server._perun_agent_id = "peruntheoverseer"
     result = await server.call_tool(
         "perunchat_upload_package",
         {
@@ -191,6 +198,7 @@ async def test_upload_package_sends_begin_chunks_end(
         },
     )
     assert result["isError"] is False
+    assert all(frame["recipient_id"] == "peruntheoverseer" for frame in frames)
     assert frames[0]["payload"]["op"] == "package_begin"
     assert frames[0]["payload"]["sha256"] == hashlib.sha256(archive).hexdigest()
     assert frames[-1]["payload"]["op"] == "package_end"
@@ -313,7 +321,7 @@ async def test_handoff_paths_are_confined_to_handoff_dir(
 
 @pytest.mark.asyncio
 async def test_execution_status_returns_payload(server: PerunChatMCPServer) -> None:
-    async def send(room_id, room_type, content_type, payload):
+    async def send(room_id, room_type, content_type, payload, **kwargs):
         _push_control(
             server,
             "application/perun-execution-result",
