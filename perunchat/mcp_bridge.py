@@ -259,6 +259,7 @@ class PerunChatMCPServer:
         timeout: float = 30.0,
         *,
         since: int = 0,
+        transfer_id: str = "",
     ) -> Dict[str, Any]:
         def matches(frame: Dict[str, Any]) -> bool:
             if frame.get("content_type") != self._EXECUTION_RESULT_CONTENT_TYPE:
@@ -266,7 +267,11 @@ class PerunChatMCPServer:
             payload = frame.get("payload") or {}
             if payload.get("op") not in (None, op):
                 return False
-            return payload.get("proposal_id") in (None, proposal_id)
+            if payload.get("proposal_id") not in (None, proposal_id):
+                return False
+            if transfer_id and payload.get("transfer_id") not in (None, transfer_id):
+                return False
+            return True
 
         frame = await self._wait_for_frame(matches, timeout, since=since)
         return frame.get("payload") or {}
@@ -346,7 +351,11 @@ class PerunChatMCPServer:
         )
         _ = begin
         begin_result = await self._wait_for_result(
-            "package_begin", proposal_id, timeout=30.0, since=since
+            "package_begin",
+            proposal_id,
+            timeout=30.0,
+            since=since,
+            transfer_id=transfer_id,
         )
         if not begin_result.get("ok", True):
             raise ValueError(
