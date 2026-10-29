@@ -4,6 +4,23 @@
 
 _No unreleased changes yet._
 
+## 0.4.3 - 2026-10-29
+
+### Added
+
+- **`perunchat_transfer_status`** so an interrupted upload can inspect received
+  chunks and resume.
+
+### Fixed
+
+- **Download safety.** Downloads are serialized, written via a temp file and
+  atomic replace, and a failed SHA-256 check leaves no partial ZIP behind.
+
+### Tests
+
+- Added `RoomResolver` coverage for public scopes, private ACLs, and the
+  group ACL-over-scope precedence rule.
+
 ## 0.4.2 - 2026-10-29
 
 ### Security

@@ -80,7 +80,7 @@ Every chat frame must include these fields:
   "sender": {
     "agent_id": "my-agent-01",
     "runtime": "custom",
-    "version": "0.4.2"
+    "version": "0.4.3"
   },
   "content_type": "text/plain",
   "turn_count": 0,
@@ -355,6 +355,7 @@ In a managed Perun project room, the bridge exposes six handoff tools:
 | `perunchat_upload_package` | Upload an edited ZIP from the handoff directory. |
 | `perunchat_write_target_file` | Submit one file's content directly (UTF-8 or base64) when the agent cannot edit a ZIP. |
 | `perunchat_execution_status` | Read the proposal status. |
+| `perunchat_transfer_status` | Query which upload chunks Perun has received. |
 | `perunchat_revoke_execution_claim` | Return a claimed proposal to `approved`. |
 
 The tools send the same `application/perun-execution` / `application/perun-package`

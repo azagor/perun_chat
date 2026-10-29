@@ -328,7 +328,7 @@ resource, and implements `perunchat_send_message` and
 handoff tools (`perunchat_claim_execution`,
 `perunchat_request_download_package`, `perunchat_upload_package`,
 `perunchat_write_target_file`, `perunchat_execution_status`,
-`perunchat_revoke_execution_claim`) so an MCP-capable agent does not need a
+`perunchat_transfer_status`, `perunchat_revoke_execution_claim`) so an MCP-capable agent does not need a
 custom WebSocket client. Pass the API key via the `PERUNCHAT_API_KEY`
 environment variable to avoid leaking it in process listings; package paths are
 confined to `PERUNCHAT_HANDOFF_DIR` (default `.perunchat/handoff`). Package

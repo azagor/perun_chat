@@ -320,6 +320,96 @@ async def test_handoff_paths_are_confined_to_handoff_dir(
 
 
 @pytest.mark.asyncio
+async def test_download_sha_mismatch_removes_partial(
+    server: PerunChatMCPServer, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("PERUNCHAT_HANDOFF_DIR", str(tmp_path))
+    archive = _zip_bytes("README.md", b"hello\n")
+    transfer_id = "trf_badsha"
+    server._package_chunks[transfer_id] = {0: archive}
+    server._package_bytes[transfer_id] = len(archive)
+
+    async def send(room_id, room_type, content_type, payload, **kwargs):
+        _push_control(
+            server,
+            "application/perun-execution",
+            {
+                "op": "package_ready",
+                "proposal_id": "prop_test",
+                "transfer_id": transfer_id,
+                "sha256": "0" * 64,
+                "total_size": len(archive),
+                "total_chunks": 1,
+            },
+        )
+        return {}
+
+    _install_client(server, send)
+    destination = tmp_path / "bad.zip"
+    result = await server.call_tool(
+        "perunchat_request_download_package",
+        {
+            "room_id": "grp:perun:demo:chat",
+            "proposal_id": "prop_test",
+            "destination": str(destination),
+        },
+    )
+    assert result["isError"] is True
+    assert "sha256 mismatch" in result["content"][0]["text"]
+    assert not destination.exists()
+    assert transfer_id not in server._package_chunks
+
+
+@pytest.mark.asyncio
+async def test_transfer_status_returns_payload(server: PerunChatMCPServer) -> None:
+    async def send(room_id, room_type, content_type, payload, **kwargs):
+        _push_control(
+            server,
+            "application/perun-execution-result",
+            {
+                "op": "transfer_status",
+                "transfer_id": payload["transfer_id"],
+                "ok": True,
+                "received_chunks": [0],
+                "missing": [1],
+            },
+        )
+        return {}
+
+    _install_client(server, send)
+    result = await server.call_tool(
+        "perunchat_transfer_status",
+        {"room_id": "grp:perun:demo:chat", "transfer_id": "trf_test"},
+    )
+    assert result["isError"] is False
+    assert '"missing": [' in result["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_revoke_claim_returns_payload(server: PerunChatMCPServer) -> None:
+    async def send(room_id, room_type, content_type, payload, **kwargs):
+        _push_control(
+            server,
+            "application/perun-execution-result",
+            {
+                "op": "revoke_execution_claim",
+                "proposal_id": payload["proposal_id"],
+                "ok": True,
+                "proposal": {"id": payload["proposal_id"], "status": "approved"},
+            },
+        )
+        return {}
+
+    _install_client(server, send)
+    result = await server.call_tool(
+        "perunchat_revoke_execution_claim",
+        {"room_id": "grp:perun:demo:chat", "proposal_id": "prop_test"},
+    )
+    assert result["isError"] is False
+    assert '"status": "approved"' in result["content"][0]["text"]
+
+
+@pytest.mark.asyncio
 async def test_execution_status_returns_payload(server: PerunChatMCPServer) -> None:
     async def send(room_id, room_type, content_type, payload, **kwargs):
         _push_control(

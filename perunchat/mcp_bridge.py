@@ -69,6 +69,7 @@ class PerunChatMCPServer:
         self._RoomType: Any = None
         self._RiskTier: Any = None
         self._perun_agent_id = ""
+        self._download_lock = asyncio.Lock()
         self._room_messages: Dict[str, List[Dict[str, Any]]] = {}
         # Control/result frames and package chunks are kept separately so the
         # chat resource stays small and chunks do not evict recent messages.
@@ -690,6 +691,26 @@ class PerunChatMCPServer:
                 },
             },
             {
+                "name": "perunchat_transfer_status",
+                "description": (
+                    "Query which upload chunks Perun has received for a transfer, "
+                    "so an interrupted upload can resume."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "room_id": {"type": "string"},
+                        "room_type": {
+                            "type": "string",
+                            "enum": ["PRIVATE", "GROUP", "PUBLIC"],
+                            "default": "GROUP",
+                        },
+                        "transfer_id": {"type": "string"},
+                    },
+                    "required": ["room_id", "transfer_id"],
+                },
+            },
+            {
                 "name": "perunchat_revoke_execution_claim",
                 "description": (
                     "Return a claimed Perun proposal to approved. Only the claim holder "
@@ -780,73 +801,79 @@ class PerunChatMCPServer:
                 )
                 return _result_response(payload)
             if name == "perunchat_request_download_package":
-                proposal_id = str(arguments.get("proposal_id") or "").strip()
-                if not proposal_id:
-                    return _err("proposal_id is required")
-                raw_destination = arguments.get("destination")
-                try:
-                    destination = self._resolve_handoff_path(
-                        str(raw_destination or ""), f"{proposal_id}.zip"
-                    )
-                    if destination.is_dir():
+                async with self._download_lock:
+                    proposal_id = str(arguments.get("proposal_id") or "").strip()
+                    if not proposal_id:
+                        return _err("proposal_id is required")
+                    raw_destination = arguments.get("destination")
+                    try:
                         destination = self._resolve_handoff_path(
-                            str(destination / f"{proposal_id}.zip"), ""
+                            str(raw_destination or ""), f"{proposal_id}.zip"
                         )
-                except ValueError as exc:
-                    return _err(str(exc))
-                request: Dict[str, Any] = {
-                    "op": "request_download_package",
-                    "proposal_id": proposal_id,
-                }
-                paths = arguments.get("paths")
-                if paths is not None:
-                    if not isinstance(paths, list) or not all(
-                        isinstance(item, str) for item in paths
-                    ):
-                        return _err("paths must be a list of strings")
-                    request["paths"] = paths
-                since = self._control_seq
-                await self._send_execution(client, room_id, room_type, request)
-                ready = await self._wait_for_package_ready(
-                    proposal_id, since=since
-                )
-                transfer_id = str(ready.get("transfer_id") or "")
-                try:
-                    total_chunks = int(ready.get("total_chunks") or 0)
-                except (TypeError, ValueError):
-                    total_chunks = 0
-                if not transfer_id or total_chunks <= 0:
-                    return _err("package_ready did not include a valid transfer")
-                try:
-                    archive = await self._collect_package(transfer_id, total_chunks)
-                finally:
-                    self._drop_package(transfer_id)
-                expected_size = int(ready.get("total_size") or len(archive))
-                if len(archive) != expected_size:
-                    return _err(
-                        f"download size mismatch: expected {expected_size}, got {len(archive)}"
+                        if destination.is_dir():
+                            destination = self._resolve_handoff_path(
+                                str(destination / f"{proposal_id}.zip"), ""
+                            )
+                    except ValueError as exc:
+                        return _err(str(exc))
+                    request: Dict[str, Any] = {
+                        "op": "request_download_package",
+                        "proposal_id": proposal_id,
+                    }
+                    paths = arguments.get("paths")
+                    if paths is not None:
+                        if not isinstance(paths, list) or not all(
+                            isinstance(item, str) for item in paths
+                        ):
+                            return _err("paths must be a list of strings")
+                        request["paths"] = paths
+                    since = self._control_seq
+                    await self._send_execution(client, room_id, room_type, request)
+                    ready = await self._wait_for_package_ready(
+                        proposal_id, since=since
                     )
-                digest = hashlib.sha256(archive).hexdigest()
-                expected_digest = str(ready.get("sha256") or "").lower()
-                if expected_digest and digest != expected_digest:
-                    return _err("download sha256 mismatch")
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(archive)
-                return _ok(
-                    json.dumps(
-                        {
-                            "ok": True,
-                            "proposal_id": proposal_id,
-                            "transfer_id": transfer_id,
-                            "path": str(destination),
-                            "sha256": digest,
-                            "total_size": len(archive),
-                            "total_chunks": total_chunks,
-                        },
-                        ensure_ascii=False,
-                        indent=2,
+                    transfer_id = str(ready.get("transfer_id") or "")
+                    try:
+                        total_chunks = int(ready.get("total_chunks") or 0)
+                    except (TypeError, ValueError):
+                        total_chunks = 0
+                    if not transfer_id or total_chunks <= 0:
+                        return _err("package_ready did not include a valid transfer")
+                    try:
+                        archive = await self._collect_package(transfer_id, total_chunks)
+                    finally:
+                        self._drop_package(transfer_id)
+                    expected_size = int(ready.get("total_size") or len(archive))
+                    if len(archive) != expected_size:
+                        return _err(
+                            f"download size mismatch: expected {expected_size}, got {len(archive)}"
+                        )
+                    digest = hashlib.sha256(archive).hexdigest()
+                    expected_digest = str(ready.get("sha256") or "").lower()
+                    if expected_digest and digest != expected_digest:
+                        return _err("download sha256 mismatch")
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    temp_path = destination.with_name(destination.name + ".part")
+                    try:
+                        temp_path.write_bytes(archive)
+                        os.replace(temp_path, destination)
+                    finally:
+                        temp_path.unlink(missing_ok=True)
+                    return _ok(
+                        json.dumps(
+                            {
+                                "ok": True,
+                                "proposal_id": proposal_id,
+                                "transfer_id": transfer_id,
+                                "path": str(destination),
+                                "sha256": digest,
+                                "total_size": len(archive),
+                                "total_chunks": total_chunks,
+                            },
+                            ensure_ascii=False,
+                            indent=2,
+                        )
                     )
-                )
             if name == "perunchat_upload_package":
                 proposal_id = str(arguments.get("proposal_id") or "").strip()
                 zip_path = str(arguments.get("zip_path") or "").strip()
@@ -897,6 +924,25 @@ class PerunChatMCPServer:
                 )
                 payload = await self._wait_for_result(
                     "execution_status", proposal_id, timeout=30.0, since=since
+                )
+                return _result_response(payload)
+            if name == "perunchat_transfer_status":
+                transfer_id = str(arguments.get("transfer_id") or "").strip()
+                if not transfer_id:
+                    return _err("transfer_id is required")
+                since = self._control_seq
+                await self._send_execution(
+                    client,
+                    room_id,
+                    room_type,
+                    {"op": "transfer_status", "transfer_id": transfer_id},
+                )
+                payload = await self._wait_for_result(
+                    "transfer_status",
+                    "",
+                    timeout=30.0,
+                    since=since,
+                    transfer_id=transfer_id,
                 )
                 return _result_response(payload)
             if name == "perunchat_revoke_execution_claim":
