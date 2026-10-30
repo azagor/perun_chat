@@ -1255,3 +1255,26 @@ async def test_rotate_key_tool_persists_new_key(
     result = await server.call_tool("perunchat_rotate_key", {})
     assert result["isError"] is False
     assert key_file.read_text().strip() == "prn_live_newsecret"
+
+def test_expired_ticket_is_rejected() -> None:
+    from perunchat.gateway import TicketStore
+    import time
+
+    store = TicketStore(ttl=30)
+    ticket = store.issue("key_x")
+    store._tickets[ticket] = ("key_x", time.time() - 1)
+    assert store.consume(ticket) is None
+
+
+@pytest.mark.asyncio
+async def test_rotate_key_refuses_unwritable_path(
+    server: PerunChatMCPServer, tmp_path, monkeypatch
+) -> None:
+    client = _install_client(server, AsyncMock(return_value={}))
+    client.rotate_key = AsyncMock()
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x")
+    monkeypatch.setenv("PERUNCHAT_KEY_FILE", str(blocker / "key.txt"))
+    result = await server.call_tool("perunchat_rotate_key", {})
+    assert result["isError"] is True
+    client.rotate_key.assert_not_awaited()

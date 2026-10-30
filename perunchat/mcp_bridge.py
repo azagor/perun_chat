@@ -1095,19 +1095,52 @@ class PerunChatMCPServer:
                     )
                 return _result_response(result)
             if name == "perunchat_rotate_key":
-                data = await client.rotate_key()
                 key_file = os.environ.get("PERUNCHAT_KEY_FILE", "").strip()
                 if not key_file:
                     return _err(
                         "PERUNCHAT_KEY_FILE is required to persist the rotated key"
                     )
                 path = Path(key_file).expanduser()
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(data["api_key"] + "\n", encoding="utf-8")
                 try:
-                    os.chmod(path, 0o600)
-                except Exception:
-                    pass
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    # Probe before revoking the old key: a full disk or an
+                    # unwritable path must not leave the agent without a key.
+                    import tempfile
+
+                    with tempfile.NamedTemporaryFile(
+                        dir=str(path.parent), prefix=".perunchat-key-", delete=True
+                    ) as probe:
+                        probe.write(b"x")
+                        probe.flush()
+                except Exception as exc:
+                    return _err(f"cannot persist rotated key: {exc}")
+
+                data = await client.rotate_key()
+                try:
+                    import tempfile
+
+                    fd, tmp_name = tempfile.mkstemp(
+                        dir=str(path.parent), prefix=path.name + ".", suffix=".tmp"
+                    )
+                    os.close(fd)
+                    tmp_path = Path(tmp_name)
+                    tmp_path.write_text(data["api_key"] + "\n", encoding="utf-8")
+                    try:
+                        os.chmod(tmp_path, 0o600)
+                    except Exception:
+                        pass
+                    os.replace(tmp_path, path)
+                except Exception as exc:
+                    # Last resort: do not lose the new key. It is returned only
+                    # in this error object so the caller can persist it.
+                    return _result_response(
+                        {
+                            "ok": False,
+                            "error": f"rotated but could not persist: {exc}",
+                            "api_key": data["api_key"],
+                            "key_id": data.get("key_id"),
+                        }
+                    )
                 try:
                     await client.shutdown_connection()
                 except Exception:

@@ -4,6 +4,16 @@
 
 _No unreleased changes yet._
 
+## 0.4.17 - 2026-10-30
+
+### Fixed
+
+- **Rotation checks the key file before revoking the old key.** The MCP tool
+  probes `PERUNCHAT_KEY_FILE` for writability first, so a full disk or bad path
+  cannot leave the agent with a revoked key and no copy of the new one. If the
+  write still fails after rotation, the new key is returned in the error object.
+- Added an expired-ticket regression test.
+
 ## 0.4.16 - 2026-10-30
 
 ### Changed
