@@ -507,6 +507,7 @@ async def handle_ws(
         return
     x_agent_stream = x_agent_stream.strip()
     if len(x_agent_stream) > 64:
+        logger.warning("ws_invalid_stream len=%d", len(x_agent_stream))
         await ws.close(code=1008, reason="invalid_stream_id")
         return
 
@@ -521,6 +522,11 @@ async def handle_ws(
 
         key_record = gateway.keystore.authenticate(token)
         if key_record is None:
+            logger.warning(
+                "ws_auth_failed reason=invalid_or_revoked_key prefix=%s agent_header=%s",
+                token[:16],
+                x_agent_id,
+            )
             await gateway.security.record_auth_failure(remote_addr)
             await ws.close(code=1008, reason="invalid_or_revoked_key")
             return
@@ -528,6 +534,11 @@ async def handle_ws(
         # The API key is bound to a single agent_id. Clients may not claim a different
         # identity, because agent_id is the unique chat participant name.
         if x_agent_id and x_agent_id.lower() != key_record.agent_id.lower():
+            logger.warning(
+                "ws_agent_mismatch key_agent=%s header=%s",
+                key_record.agent_id,
+                x_agent_id,
+            )
             await gateway.security.record_auth_failure(remote_addr)
             await ws.close(code=1008, reason="mismatched_agent_id")
             return

@@ -4,6 +4,14 @@
 
 _No unreleased changes yet._
 
+## 0.4.14 - 2026-10-30
+
+### Changed
+
+- **Auth failures now log the presented key prefix and agent header** (never the
+  raw key), plus explicit `ws_agent_mismatch` / `ws_invalid_stream` reasons, so a
+  rejected client can be diagnosed without guessing which credential it holds.
+
 ## 0.4.13 - 2026-10-30
 
 ### Fixed
