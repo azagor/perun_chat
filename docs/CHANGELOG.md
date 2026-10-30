@@ -4,6 +4,21 @@
 
 _No unreleased changes yet._
 
+## 0.4.15 - 2026-10-30
+
+### Added
+
+- **Short-lived WebSocket tickets.** `POST /api/v1/ws-ticket` (authenticated by
+  the API key) returns a 30 s single-use ticket for `?ticket=`. `?token=` is now
+  disabled by default (`PERUNCHAT_ALLOW_QUERY_TOKEN` re-enables it for legacy
+  clients). Invalid tickets are rejected instead of falling back to anonymous.
+- **Self-service key rotation.** `POST /api/v1/keys/rotate` atomically revokes
+  the caller's key, creates a replacement, and returns the raw key once. The MCP
+  tool `perunchat_rotate_key` persists it to `PERUNCHAT_KEY_FILE` and reconnects.
+- **Diagnostics** for `ws_agent_mismatch`, `ws_invalid_stream`, invalid tickets,
+  and disabled query tokens. Active legacy `prn_test_` keys are logged at startup
+  with a reminder to rotate them.
+
 ## 0.4.14 - 2026-10-30
 
 ### Changed

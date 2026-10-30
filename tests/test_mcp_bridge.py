@@ -1235,3 +1235,23 @@ def test_serve_mcp_stub_does_not_crash() -> None:
         with patch("builtins.print") as print_mock:
             serve_mcp("ws://localhost/ws", "key", "agent-1", "stdio")
     assert any("perunchat_send_message" in str(c) for c in print_mock.call_args_list)
+
+@pytest.mark.asyncio
+async def test_rotate_key_tool_persists_new_key(
+    server: PerunChatMCPServer, tmp_path, monkeypatch
+) -> None:
+    client = _install_client(server, AsyncMock(return_value={}))
+    client.rotate_key = AsyncMock(
+        return_value={
+            "api_key": "prn_live_newsecret",
+            "agent_id": "test-agent",
+            "key_id": "key_new",
+        }
+    )
+    client.shutdown_connection = AsyncMock()
+    client.connect = AsyncMock()
+    key_file = tmp_path / "key.txt"
+    monkeypatch.setenv("PERUNCHAT_KEY_FILE", str(key_file))
+    result = await server.call_tool("perunchat_rotate_key", {})
+    assert result["isError"] is False
+    assert key_file.read_text().strip() == "prn_live_newsecret"

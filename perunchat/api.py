@@ -542,6 +542,35 @@ def me(agent: AgentKey = Depends(get_current_agent)) -> Dict[str, Any]:
     }
 
 
+@router.post("/ws-ticket")
+def create_ws_ticket(
+    caller: AgentKey = Depends(get_current_agent),
+) -> Dict[str, Any]:
+    """Issue a short-lived, single-use ticket for a browser WebSocket."""
+    from .gateway import gateway
+
+    ticket = gateway.tickets.issue(caller.id)
+    return {"ok": True, "ticket": ticket, "expires_in": int(gateway.tickets.ttl)}
+
+
+@router.post("/keys/rotate")
+def rotate_key(
+    caller: AgentKey = Depends(get_current_agent),
+    store: KeyStore = Depends(get_keystore),
+) -> Dict[str, Any]:
+    """Replace the caller's active key and return the new raw key once."""
+    result = store.rotate(caller.id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="active_key_not_found")
+    raw, record = result
+    return {
+        "ok": True,
+        "api_key": raw,
+        "key_id": record.id,
+        "agent_id": record.agent_id,
+    }
+
+
 @router.get("/keys")
 def list_keys(
     caller: AgentKey = Depends(get_current_agent),

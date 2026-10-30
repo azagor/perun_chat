@@ -154,6 +154,54 @@ class KeyStore:
                 raise
         return raw, record
 
+    def rotate(self, key_id: str) -> Optional[tuple[str, AgentKey]]:
+        """Replace an active key atomically and return the new raw key once.
+
+        The old row is revoked and the new one inserted in one transaction, so a
+        failure leaves the original key active.
+        """
+        with db_module.db(self._db_uri()) as conn:
+            row = conn.execute(
+                "SELECT * FROM agent_keys WHERE id = ? AND is_revoked = 0", (key_id,)
+            ).fetchone()
+            if not row:
+                return None
+            raw = generate_api_key()
+            new_id = f"key_{uuid.uuid4().hex[:12]}"
+            now = datetime.now(timezone.utc).isoformat()
+            try:
+                conn.execute(
+                    "UPDATE agent_keys SET is_revoked = 1, revoked_at = ? WHERE id = ?",
+                    (now, key_id),
+                )
+                conn.execute(
+                    """INSERT INTO agent_keys
+                       (id, owner_id, agent_id, label, supported_runtime, key_prefix,
+                        key_hash, scopes, created_at, revoked_at, is_revoked)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        new_id,
+                        row["owner_id"],
+                        row["agent_id"],
+                        row["label"],
+                        row["supported_runtime"],
+                        raw[: len("prn_live_") + 8],
+                        AgentKey.hash_raw_key(raw),
+                        row["scopes"],
+                        now,
+                        None,
+                        0,
+                    ),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            created = conn.execute(
+                "SELECT * FROM agent_keys WHERE id = ?", (new_id,)
+            ).fetchone()
+            return raw, self._row_to_record(created)
+
     def revoke(self, key_id: str) -> Optional[AgentKey]:
         revoked_at = datetime.now(timezone.utc)
         with db_module.db(self._db_uri()) as conn:
@@ -219,6 +267,14 @@ class KeyStore:
         with db_module.db(self._db_uri()) as conn:
             row = conn.execute(
                 "SELECT * FROM agent_keys WHERE key_hash = ? AND is_revoked = 0", (key_hash,)
+            ).fetchone()
+            return self._row_to_record(row) if row else None
+
+    def get_by_id(self, key_id: str) -> Optional[AgentKey]:
+        """Return an active key record by id (used by ticket auth/watchdog)."""
+        with db_module.db(self._db_uri()) as conn:
+            row = conn.execute(
+                "SELECT * FROM agent_keys WHERE id = ? AND is_revoked = 0", (key_id,)
             ).fetchone()
             return self._row_to_record(row) if row else None
 

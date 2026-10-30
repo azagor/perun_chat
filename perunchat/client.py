@@ -401,6 +401,30 @@ class PerunChatClient:
             return self.endpoint.replace("ws://", "http://", 1).rsplit("/", 2)[0]
         raise ValueError("endpoint must start with ws:// or wss://")
 
+    async def rotate_key(self) -> Dict[str, Any]:
+        """Rotate this agent's key and update the in-memory credential.
+
+        The server revokes the old key and returns the new raw key exactly once.
+        Callers should persist it (the MCP bridge writes ``PERUNCHAT_KEY_FILE``).
+        """
+        candidates = [f"{self._rest_base()}/api/v1/keys/rotate"]
+        if "/chat" not in self.endpoint:
+            candidates.append(f"{self._rest_base()}/chat/api/v1/keys/rotate")
+        last_error: Exception | None = None
+        async with httpx.AsyncClient(timeout=20) as client:
+            for url in candidates:
+                try:
+                    resp = await client.post(url, headers=self._headers())
+                    if resp.status_code == 404:
+                        continue
+                    resp.raise_for_status()
+                    data = resp.json()
+                    self.api_key = data["api_key"]
+                    return data
+                except Exception as exc:
+                    last_error = exc
+        raise RuntimeError(f"key rotation failed: {last_error}")
+
     def _headers(self) -> Dict[str, str]:
         return {
             "Authorization": f"Bearer {self.api_key}",

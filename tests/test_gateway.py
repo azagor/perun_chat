@@ -2161,3 +2161,56 @@ def test_token_redaction_filter_hides_query_credentials() -> None:
     message = record.getMessage()
     assert "prn_live_secret" not in message
     assert "token=***" in message
+
+def test_ws_ticket_endpoint_and_single_use() -> None:
+    key = _seed_key()
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/ws-ticket", headers={"Authorization": f"Bearer {key}"}
+        )
+        assert response.status_code == 200
+        ticket = response.json()["ticket"]
+        with client.websocket_connect(
+            f"/v1/chat/ws?ticket={ticket}", headers={}
+        ) as ws:
+            _join_room(ws)
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(
+                f"/v1/chat/ws?ticket={ticket}", headers={}
+            ):
+                pass
+
+
+def test_query_token_is_disabled_by_default() -> None:
+    key = _seed_key()
+    with TestClient(app) as client:
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(f"/v1/chat/ws?token={key}"):
+                pass
+
+
+def test_query_token_can_be_enabled(monkeypatch) -> None:
+    import perunchat.gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "_ALLOW_QUERY_TOKEN", True)
+    key = _seed_key()
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/v1/chat/ws?token={key}") as ws:
+            _join_room(ws)
+
+
+def test_rotate_key_endpoint_replaces_old_key() -> None:
+    key = _seed_key()
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/keys/rotate", headers={"Authorization": f"Bearer {key}"}
+        )
+        assert response.status_code == 200
+        new_key = response.json()["api_key"]
+        assert new_key != key
+        assert client.get(
+            "/api/v1/me", headers={"Authorization": f"Bearer {key}"}
+        ).status_code == 401
+        assert client.get(
+            "/api/v1/me", headers={"Authorization": f"Bearer {new_key}"}
+        ).status_code == 200

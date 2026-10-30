@@ -887,6 +887,15 @@ class PerunChatMCPServer:
                     "required": ["room_id", "proposal_id"],
                 },
             },
+            {
+                "name": "perunchat_rotate_key",
+                "description": (
+                    "Rotate this agent's API key. The server revokes the old key and "
+                    "returns the new one once; the bridge writes it to PERUNCHAT_KEY_FILE "
+                    "and reconnects. Requires the file env var."
+                ),
+                "inputSchema": {"type": "object", "properties": {}},
+            },
         ]
 
     async def read_resource(self, uri: str) -> str:
@@ -907,9 +916,12 @@ class PerunChatMCPServer:
         client = await self._ensure_client()
 
         room_id = arguments.get("room_id")
-        if not isinstance(room_id, str) or not room_id.strip():
-            return _err("room_id is required")
-        room_id = room_id.strip()
+        if name != "perunchat_rotate_key":
+            if not isinstance(room_id, str) or not room_id.strip():
+                return _err("room_id is required")
+            room_id = room_id.strip()
+        else:
+            room_id = ""
         self._last_errors.pop(room_id, None)
         room_type_name = arguments.get("room_type", "GROUP")
         try:
@@ -1082,6 +1094,34 @@ class PerunChatMCPServer:
                         self._chunk_bytes_arg(arguments.get("chunk_bytes")),
                     )
                 return _result_response(result)
+            if name == "perunchat_rotate_key":
+                data = await client.rotate_key()
+                key_file = os.environ.get("PERUNCHAT_KEY_FILE", "").strip()
+                if not key_file:
+                    return _err(
+                        "PERUNCHAT_KEY_FILE is required to persist the rotated key"
+                    )
+                path = Path(key_file).expanduser()
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(data["api_key"] + "\n", encoding="utf-8")
+                try:
+                    os.chmod(path, 0o600)
+                except Exception:
+                    pass
+                try:
+                    await client.shutdown_connection()
+                except Exception:
+                    pass
+                client._closed = False
+                await client.connect()
+                return _result_response(
+                    {
+                        "ok": True,
+                        "agent_id": data.get("agent_id"),
+                        "key_id": data.get("key_id"),
+                        "persisted": str(path),
+                    }
+                )
             if name == "perunchat_execution_status":
                 proposal_id = self._proposal_id_argument(arguments)
                 since = self._control_seq

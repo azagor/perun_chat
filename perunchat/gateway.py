@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import time
 from collections import deque
 from contextlib import asynccontextmanager
@@ -26,6 +27,44 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 logger = logging.getLogger("perunchat.gateway")
+
+# Legacy ?token=<api key> is disabled by default; browsers should obtain a
+# short-lived ticket from POST /api/v1/ws-ticket instead.
+_ALLOW_QUERY_TOKEN = os.environ.get("PERUNCHAT_ALLOW_QUERY_TOKEN", "").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+
+
+class TicketStore:
+    """Short-lived, single-use WebSocket tickets bound to a key id."""
+
+    def __init__(self, ttl: float = 30.0, max_tickets: int = 1000) -> None:
+        self.ttl = ttl
+        self.max_tickets = max_tickets
+        self._tickets: Dict[str, Tuple[str, float]] = {}
+
+    def _prune(self, now: float) -> None:
+        stale = [token for token, (_, exp) in self._tickets.items() if exp <= now]
+        for token in stale:
+            self._tickets.pop(token, None)
+        if len(self._tickets) > self.max_tickets:
+            ordered = sorted(self._tickets.items(), key=lambda item: item[1][1])
+            for token, _ in ordered[: len(self._tickets) - self.max_tickets]:
+                self._tickets.pop(token, None)
+
+    def issue(self, key_id: str) -> str:
+        now = time.time()
+        self._prune(now)
+        token = secrets.token_urlsafe(24)
+        self._tickets[token] = (key_id, now + self.ttl)
+        return token
+
+    def consume(self, token: str) -> Optional[str]:
+        item = self._tickets.pop(token, None)
+        if item is None:
+            return None
+        key_id, expires_at = item
+        return key_id if time.time() <= expires_at else None
 
 
 class _TokenRedactionFilter(logging.Filter):
@@ -303,6 +342,7 @@ class ChatGateway:
         self.lock = asyncio.Lock()
         # agent_id -> set of active WebSocket connections
         self._presence: Dict[str, Set[WebSocket]] = {}
+        self.tickets = TicketStore()
 
     async def ensure_room(self, room_id: str, room_type: str) -> Room:
         async with self.lock:
@@ -402,10 +442,28 @@ def _load_room_members() -> None:
         pass
 
 
+def _warn_legacy_keys() -> None:
+    """Warn when an active key still uses the legacy test prefix."""
+    try:
+        with db_module.db(config.db_path()) as conn:
+            rows = conn.execute(
+                "SELECT agent_id FROM agent_keys "
+                "WHERE is_revoked=0 AND key_prefix LIKE 'prn_test_%'"
+            ).fetchall()
+        for row in rows:
+            logger.warning(
+                "legacy prn_test_ key active for %s; rotate it via perunchat_rotate_key",
+                row["agent_id"],
+            )
+    except Exception:
+        pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.gateway = gateway
     _load_room_members()
+    _warn_legacy_keys()
     turn_cleanup = asyncio.create_task(_turn_counter_cleanup_task())
     yield
     turn_cleanup.cancel()
@@ -457,6 +515,18 @@ def _bearer_from_query(ws: WebSocket) -> Optional[str]:
         return values[0] if values else None
     except Exception:
         return None
+
+
+def _ticket_from_query(ws: WebSocket) -> str:
+    """Return a short-lived WebSocket ticket from ?ticket=."""
+    try:
+        from urllib.parse import parse_qs, urlparse
+
+        parsed = urlparse(str(ws.url))
+        values = parse_qs(parsed.query).get("ticket", [])
+        return values[0].strip() if values else ""
+    except Exception:
+        return ""
 
 
 def _effective_runtime(key_record: Optional[Any], header_runtime: str) -> str:
@@ -511,7 +581,24 @@ async def handle_ws(
         await ws.close(code=1008, reason="invalid_stream_id")
         return
 
-    token = extract_bearer(authorization) or _bearer_from_query(ws)
+    token = extract_bearer(authorization)
+    ticket_key_id = ""
+    if not token:
+        ticket = _ticket_from_query(ws)
+        if ticket:
+            ticket_key_id = gateway.tickets.consume(ticket) or ""
+            if not ticket_key_id:
+                logger.warning("ws_auth_failed reason=invalid_ticket")
+                await ws.close(code=1008, reason="invalid_ticket")
+                return
+        else:
+            query_token = _bearer_from_query(ws) or ""
+            if query_token:
+                if not _ALLOW_QUERY_TOKEN:
+                    logger.warning("ws_auth_failed reason=query_token_disabled")
+                    await ws.close(code=1008, reason="query_token_disabled")
+                    return
+                token = query_token
     key_record = None
 
     if token:
@@ -542,6 +629,14 @@ async def handle_ws(
             await gateway.security.record_auth_failure(remote_addr)
             await ws.close(code=1008, reason="mismatched_agent_id")
             return
+    elif ticket_key_id:
+        key_record = gateway.keystore.get_by_id(ticket_key_id)
+        if key_record is None:
+            logger.warning(
+                "ws_auth_failed reason=invalid_ticket_key key_id=%s", ticket_key_id
+            )
+            await ws.close(code=1008, reason="invalid_or_revoked_key")
+            return
     else:
         # Anonymous connections are allowed only as read-only observers in public
         # rooms. They cannot join group/private rooms or send frames.
@@ -561,6 +656,7 @@ async def handle_ws(
     bad_frames = 0
 
     watchdog: "asyncio.Task[None] | None" = None
+    auth_key_id = key_record.id if key_record else ""
 
     if agent_id:
         became_online = gateway.mark_online(agent_id, ws)
@@ -571,13 +667,13 @@ async def handle_ws(
                 pass
 
     try:
-        if token:
+        if auth_key_id:
             async def _revocation_watchdog() -> None:
                 while True:
                     await asyncio.sleep(_AUTH_RECHECK_SECONDS)
                     try:
                         current = await asyncio.to_thread(
-                            gateway.keystore.authenticate, token
+                            gateway.keystore.get_by_id, auth_key_id
                         )
                     except Exception:
                         current = None
