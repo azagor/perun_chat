@@ -4,6 +4,13 @@
 
 _No unreleased changes yet._
 
+## 0.4.16 - 2026-10-30
+
+### Changed
+
+- **Legacy-key reminder runs daily.** Active `prn_test_` keys are logged at
+  startup and every 24 hours; rotate them with `perunchat_rotate_key`.
+
 ## 0.4.15 - 2026-10-30
 
 ### Added

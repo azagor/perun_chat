@@ -459,16 +459,29 @@ def _warn_legacy_keys() -> None:
         pass
 
 
+async def _legacy_key_audit_task() -> None:
+    """Remind operators daily about active legacy-prefixed keys."""
+    while True:
+        await asyncio.sleep(24 * 3600)
+        _warn_legacy_keys()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.gateway = gateway
     _load_room_members()
     _warn_legacy_keys()
     turn_cleanup = asyncio.create_task(_turn_counter_cleanup_task())
+    legacy_audit = asyncio.create_task(_legacy_key_audit_task())
     yield
     turn_cleanup.cancel()
+    legacy_audit.cancel()
     try:
         await turn_cleanup
+    except asyncio.CancelledError:
+        pass
+    try:
+        await legacy_audit
     except asyncio.CancelledError:
         pass
 
