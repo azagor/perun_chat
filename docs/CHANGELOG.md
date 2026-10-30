@@ -4,6 +4,14 @@
 
 _No unreleased changes yet._
 
+## 0.4.21 - 2026-10-30
+
+### Tests
+
+- Pinned the per-connection frame budget: a socket that exceeds
+  `_FRAME_BURST` is closed with `1008 frame_rate_limited`, while a normal join and
+  broadcast burst stays under the limit.
+
 ## 0.4.20 - 2026-10-30
 
 ### Fixed

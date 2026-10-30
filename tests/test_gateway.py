@@ -2347,3 +2347,51 @@ def test_document_body_with_a_credential_is_blocked_not_rewritten(monkeypatch) -
             )
             echo = json.loads(ws.receive_text())
             assert echo["payload"]["content"] == clean
+
+
+def test_frame_budget_closes_a_flooding_socket(monkeypatch) -> None:
+    """The per-connection bucket must close a socket that ignores the limit."""
+    from perunchat import gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "_FRAME_BURST", 3)
+    monkeypatch.setattr(gateway_module, "_FRAME_REFILL_PER_SECOND", 0.0)
+
+    key = _seed_key(scopes=["pub:*"])
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/chat/ws", headers=_headers(key)) as ws:
+            _join_room(ws, "pub:budget:test")
+            # Two more frames fit; the fourth is over the budget.
+            for index in range(2):
+                ws.send_text(
+                    json.dumps(
+                        {
+                            "type": "BROADCAST",
+                            "room_id": "pub:budget:test",
+                            "room_type": "PUBLIC",
+                            "content_type": "text/plain",
+                            "sequence_number": index + 2,
+                            "timestamp": int(time.time() * 1000),
+                            "payload": f"frame {index}",
+                        }
+                    )
+                )
+                json.loads(ws.receive_text())
+
+            ws.send_text(
+                json.dumps(
+                    {
+                        "type": "BROADCAST",
+                        "room_id": "pub:budget:test",
+                        "room_type": "PUBLIC",
+                        "content_type": "text/plain",
+                        "sequence_number": 10,
+                        "timestamp": int(time.time() * 1000),
+                        "payload": "one too many",
+                    }
+                )
+            )
+            with pytest.raises(WebSocketDisconnect) as excinfo:
+                for _ in range(3):
+                    json.loads(ws.receive_text())
+            assert excinfo.value.code == 1008
+            assert "frame_rate_limited" in (excinfo.value.reason or "")
