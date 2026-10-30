@@ -837,7 +837,10 @@ class PerunChatMCPServer:
                 "description": (
                     "Submit one file's new content as an external execution package. "
                     "Useful when the agent cannot edit a downloaded ZIP locally. "
-                    "Perun accepts only paths approved on the proposal."
+                    "Perun accepts only paths approved on the proposal. "
+                    "`content` REPLACES the whole file: even when a proposal's "
+                    "details say `mode: append`, send the complete final file, not "
+                    "the appended fragment."
                 ),
                 "inputSchema": {
                     "type": "object",
