@@ -18,7 +18,7 @@ import os
 import re
 import secrets
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 
@@ -162,9 +162,12 @@ class SequenceValidator:
     """
 
     MAX_SKEW_MS = 120_000
+    # Bound the per-stream sequence table. A valid client can create many
+    # streams; eviction only resets ordering state (nonces still block replay).
+    MAX_STREAMS = 10_000
 
     def __init__(self) -> None:
-        self._last_seq: Dict[str, int] = {}
+        self._last_seq: OrderedDict[str, int] = OrderedDict()
         self._seen_nonces: Set[str] = set()
 
     def validate(
@@ -184,6 +187,9 @@ class SequenceValidator:
         if sequence_number <= last:
             return False, "non_monotonic_sequence"
         self._last_seq[key] = sequence_number
+        self._last_seq.move_to_end(key)
+        if len(self._last_seq) > self.MAX_STREAMS:
+            self._last_seq.popitem(last=False)
 
         now_ms = int(time.time() * 1000)
         if abs(now_ms - timestamp_ms) > self.MAX_SKEW_MS:

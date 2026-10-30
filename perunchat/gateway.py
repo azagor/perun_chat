@@ -420,6 +420,10 @@ async def handle_ws(
     x_agent_stream: str = Header(default="", alias="X-Agent-Stream"),
 ):
     remote_addr = ws.client.host if ws.client else "unknown"
+    x_agent_stream = x_agent_stream.strip()
+    if len(x_agent_stream) > 64:
+        await ws.close(code=1008, reason="invalid_stream_id")
+        return
 
     token = extract_bearer(authorization) or _bearer_from_query(ws)
     key_record = None

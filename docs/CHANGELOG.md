@@ -4,6 +4,31 @@
 
 _No unreleased changes yet._
 
+## 0.4.9 - 2026-10-30
+
+### Fixed
+
+- **MCP handoff tools reject malformed arguments instead of coercing them.**
+  `room_id`, `proposal_id`, `transfer_id`, `path` and `zip_path` must be
+  non-empty strings; `room_type` and `risk_tier` must be exact enum members
+  (unknown or lowercase values no longer fall back to GROUP / TIER_2);
+  `content` and `encoding` must be strings; `chunk_bytes` must be an integer.
+  A lone surrogate in `content` returns a clean "not valid UTF-8" error.
+- **Upload results are transfer-scoped and failures surface immediately.** The
+  final wait matches `transfer_id` strictly (with a lenient fallback for a
+  rejection that omits it), accepts `package_end` only when `ok` is false, and
+  raises the server's error text instead of returning a success-shaped dict.
+  `package_accepted` without `ok` (Perun <= 0.8.47) is treated as success.
+- **Handoff operations are serialized per proposal.** Claim, revoke, download,
+  upload and write-target-file share one per-proposal lock, so two calls for the
+  same proposal cannot race; different proposals still run concurrently. The
+  lock table is bounded to 256 entries, evicting only idle locks.
+- **Control-frame overflow is logged once per saturation episode** instead of
+  silently dropping the oldest frames.
+- **Stream identifiers are bounded.** The gateway rejects an `X-Agent-Stream`
+  longer than 64 characters, and the sequence table evicts the least-recently
+  used stream above 10,000 entries.
+
 ## 0.4.8 - 2026-10-29
 
 ### Fixed

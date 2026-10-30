@@ -63,6 +63,8 @@ class PerunChatMCPServer:
     _MAX_CONTROL_FRAMES = 512
     _MAX_PACKAGE_TRANSFERS = 8
     _CHUNK_SEND_DELAY = 0.03
+    _PACKAGE_RESULT_TIMEOUT = 180.0
+    _MAX_PROPOSAL_LOCKS = 256
 
     def __init__(self, endpoint: str, api_key: str, agent_id: str) -> None:
         self.endpoint = endpoint
@@ -72,19 +74,21 @@ class PerunChatMCPServer:
         self._RoomType: Any = None
         self._RiskTier: Any = None
         self._perun_agent_ids: Dict[str, str] = {}
-        self._download_locks: Dict[str, asyncio.Lock] = {}
-        self._last_error = ""
+        self._proposal_locks: Dict[str, asyncio.Lock] = {}
+        self._last_errors: Dict[str, str] = {}
         self._room_messages: Dict[str, List[Dict[str, Any]]] = {}
         # Control/result frames and package chunks are kept separately so the
         # chat resource stays small and chunks do not evict recent messages.
         self._control_frames: List[Dict[str, Any]] = []
         self._control_seq = 0
+        self._control_trim_warned = False
         self._package_chunks: Dict[str, Dict[int, bytes]] = {}
         self._package_bytes: Dict[str, int] = {}
         self._package_total_bytes = 0
         self._package_errors: Dict[str, str] = {}
         # Only buffer chunks for transfers Perun announced via package_ready.
         self._expected_downloads: Dict[str, float] = {}
+        self._expected_chunks: Dict[str, int] = {}
 
     async def _ensure_client(self) -> Any:
         """Lazy import and connect the async Python SDK."""
@@ -117,12 +121,10 @@ class PerunChatMCPServer:
 
     def _on_frame(self, frame: Dict[str, Any]) -> None:
         if frame.get("type") == "ERROR":
-            self._last_error = str(frame.get("message") or "gateway error")
-            logger.warning(
-                "PerunChat gateway error: %s (room=%s)",
-                self._last_error,
-                frame.get("room_id", ""),
-            )
+            room_id = str(frame.get("room_id") or "")
+            message = str(frame.get("message") or "gateway error")
+            self._last_errors[room_id] = message
+            logger.warning("PerunChat gateway error: %s (room=%s)", message, room_id)
             return
         content_type = frame.get("content_type")
         if content_type == self._PACKAGE_CONTENT_TYPE:
@@ -149,18 +151,37 @@ class PerunChatMCPServer:
             ):
                 transfer_id = str(payload["transfer_id"])
                 self._expected_downloads[transfer_id] = time.time()
+                try:
+                    self._expected_chunks[transfer_id] = int(
+                        payload.get("total_chunks") or 0
+                    )
+                except (TypeError, ValueError):
+                    self._expected_chunks[transfer_id] = 0
                 if len(self._expected_downloads) > self._MAX_PACKAGE_TRANSFERS:
                     oldest = min(
                         self._expected_downloads,
                         key=self._expected_downloads.get,
                     )
                     self._expected_downloads.pop(oldest, None)
+                    self._expected_chunks.pop(oldest, None)
+                    self._package_errors[oldest] = (
+                        "evicted: too many concurrent transfers"
+                    )
             self._control_seq += 1
             stored = dict(frame)
             stored["_mcp_seq"] = self._control_seq
             self._control_frames.append(stored)
             if len(self._control_frames) > self._MAX_CONTROL_FRAMES:
-                del self._control_frames[: len(self._control_frames) - self._MAX_CONTROL_FRAMES]
+                overflow = len(self._control_frames) - self._MAX_CONTROL_FRAMES
+                if not self._control_trim_warned:
+                    logger.warning(
+                        "control frame queue full, dropping %d oldest frame(s)",
+                        overflow,
+                    )
+                    self._control_trim_warned = True
+                del self._control_frames[:overflow]
+            else:
+                self._control_trim_warned = False
             return
         room_id = frame.get("room_id")
         if room_id:
@@ -173,6 +194,7 @@ class PerunChatMCPServer:
         self._package_total_bytes -= self._package_bytes.pop(transfer_id, 0)
         self._package_errors.pop(transfer_id, None)
         self._expected_downloads.pop(transfer_id, None)
+        self._expected_chunks.pop(transfer_id, None)
         self._package_total_bytes = max(0, self._package_total_bytes)
 
     def _buffer_package_frame(self, frame: Dict[str, Any]) -> None:
@@ -184,23 +206,42 @@ class PerunChatMCPServer:
             return
         if not isinstance(data, str):
             return
-        # Chunks are only accepted after Perun's package_ready for this
-        # transfer. This stops another room member from filling the download
-        # buffer with unsolicited (or spoofed) chunk frames.
+        # Chunks are only accepted from the managed-room owner (Perun) and only
+        # after its package_ready for this transfer. This stops another room
+        # member from filling the download buffer with spoofed chunks.
+        room_id = str(frame.get("room_id") or "").strip()
+        sender = str((frame.get("sender") or {}).get("agent_id") or "").strip().lower()
+        owner = self._perun_agent_ids.get(room_id, "").strip().lower()
+        if owner and sender != owner:
+            return
         if transfer_id not in self._expected_downloads:
+            return
+        total_chunks = self._expected_chunks.get(transfer_id, 0)
+        if total_chunks and not 0 <= seq < total_chunks:
+            self._package_errors[transfer_id] = (
+                f"chunk {seq} is outside 0..{total_chunks - 1}"
+            )
             return
         if (
             transfer_id not in self._package_chunks
             and len(self._package_chunks) >= self._MAX_PACKAGE_TRANSFERS
         ):
-            self._drop_package(next(iter(self._package_chunks)))
+            evicted = next(iter(self._package_chunks))
+            self._drop_package(evicted)
+            self._package_errors[evicted] = (
+                "evicted: too many concurrent transfers"
+            )
         chunks = self._package_chunks.setdefault(transfer_id, {})
-        if seq in chunks:
-            return
         try:
             chunk = base64.b64decode(data, validate=True)
         except Exception:
             self._package_errors[transfer_id] = f"chunk {seq} is not valid base64"
+            return
+        if seq in chunks:
+            if chunks[seq] != chunk:
+                self._package_errors[transfer_id] = (
+                    f"duplicate chunk {seq} with different data"
+                )
             return
         if self._package_total_bytes + len(chunk) > self._MAX_PACKAGE_BYTES:
             self._package_errors[transfer_id] = "download exceeds the local package size cap"
@@ -236,11 +277,20 @@ class PerunChatMCPServer:
             raise ValueError(f"handoff path must be inside {root}")
         return candidate
 
-    def _download_lock_for(self, proposal_id: str) -> asyncio.Lock:
-        lock = self._download_locks.get(proposal_id)
+    def _proposal_lock_for(self, proposal_id: str) -> asyncio.Lock:
+        """Serialize handoff operations that target the same proposal.
+
+        The table is bounded: above ``_MAX_PROPOSAL_LOCKS`` unlocked entries are
+        evicted. An in-use lock is never dropped, so serialization is preserved.
+        """
+        lock = self._proposal_locks.get(proposal_id)
         if lock is None:
+            if len(self._proposal_locks) >= self._MAX_PROPOSAL_LOCKS:
+                for key, old in list(self._proposal_locks.items()):
+                    if not old.locked():
+                        del self._proposal_locks[key]
             lock = asyncio.Lock()
-            self._download_locks[proposal_id] = lock
+            self._proposal_locks[proposal_id] = lock
         return lock
 
     async def _join_room(self, client: Any, room_id: str, room_type: Any) -> None:
@@ -265,15 +315,17 @@ class PerunChatMCPServer:
         )
 
     async def _wait_for_frame(
-        self, predicate, timeout: float, *, since: int = 0
+        self, predicate, timeout: float, *, since: int = 0, room_id: str = ""
     ) -> Dict[str, Any]:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + max(timeout, 0.1)
         while True:
-            if self._last_error:
-                error = self._last_error
-                self._last_error = ""
-                raise RuntimeError(f"PerunChat gateway rejected the frame: {error}")
+            if room_id:
+                error = self._last_errors.pop(room_id, "")
+                if error:
+                    raise RuntimeError(
+                        f"PerunChat gateway rejected the frame: {error}"
+                    )
             for frame in list(self._control_frames):
                 if int(frame.get("_mcp_seq") or 0) <= since:
                     continue
@@ -295,6 +347,7 @@ class PerunChatMCPServer:
         *,
         since: int = 0,
         transfer_id: str = "",
+        room_id: str = "",
     ) -> Dict[str, Any]:
         def matches(frame: Dict[str, Any]) -> bool:
             if frame.get("content_type") != self._EXECUTION_RESULT_CONTENT_TYPE:
@@ -308,11 +361,18 @@ class PerunChatMCPServer:
                 return False
             return True
 
-        frame = await self._wait_for_frame(matches, timeout, since=since)
+        frame = await self._wait_for_frame(
+            matches, timeout, since=since, room_id=room_id
+        )
         return frame.get("payload") or {}
 
     async def _wait_for_package_ready(
-        self, proposal_id: str, timeout: float = 60.0, *, since: int = 0
+        self,
+        proposal_id: str,
+        timeout: float = 60.0,
+        *,
+        since: int = 0,
+        room_id: str = "",
     ) -> Dict[str, Any]:
         def matches(frame: Dict[str, Any]) -> bool:
             if frame.get("content_type") != self._EXECUTION_CONTENT_TYPE:
@@ -323,7 +383,9 @@ class PerunChatMCPServer:
                 and payload.get("proposal_id") == proposal_id
             )
 
-        frame = await self._wait_for_frame(matches, timeout, since=since)
+        frame = await self._wait_for_frame(
+            matches, timeout, since=since, room_id=room_id
+        )
         return frame.get("payload") or {}
 
     async def _collect_package(
@@ -392,6 +454,7 @@ class PerunChatMCPServer:
             timeout=30.0,
             since=since,
             transfer_id=transfer_id,
+            room_id=room_id,
         )
         if not begin_result.get("ok", True):
             raise ValueError(
@@ -428,20 +491,72 @@ class PerunChatMCPServer:
             if frame.get("content_type") != self._EXECUTION_RESULT_CONTENT_TYPE:
                 return False
             payload = frame.get("payload") or {}
-            if payload.get("transfer_id") not in (None, transfer_id):
-                return False
-            if payload.get("proposal_id") not in (None, proposal_id):
-                return False
-            return payload.get("op") in (
-                "package_accepted",
-                "package_rejected",
-                "package_end",
+            op = payload.get("op")
+            if payload.get("transfer_id") == transfer_id:
+                return op in ("package_accepted", "package_rejected") or (
+                    op == "package_end" and payload.get("ok") is False
+                )
+            # Lenient rejection frames may omit transfer_id. Same-proposal
+            # handoffs are serialized, so proposal_id is unambiguous here.
+            return (
+                op == "package_rejected"
+                and payload.get("transfer_id") in (None, "")
+                and payload.get("proposal_id") == proposal_id
             )
 
-        frame = await self._wait_for_frame(matches, 180.0, since=final_since)
+        frame = await self._wait_for_frame(
+            matches, self._PACKAGE_RESULT_TIMEOUT, since=final_since, room_id=room_id
+        )
         result = frame.get("payload") or {}
         result["transfer_id"] = transfer_id
+        if result.get("op") == "package_accepted":
+            # Older Perun builds omitted ``ok`` from the success frame; treat a
+            # matching package_accepted as success unless it explicitly failed.
+            result.setdefault("ok", True)
+        if result.get("op") == "package_rejected" or result.get("ok") is False:
+            raise RuntimeError(
+                f"upload failed: "
+                f"{result.get('error') or result.get('op') or 'unknown error'}"
+            )
         return result
+
+    @staticmethod
+    def _enum_member(
+        enum_cls: Any, value: Any, field: str, *, default: str | None = None
+    ) -> Any:
+        """Resolve a strict enum member, rejecting typos and non-members.
+
+        Silent fallbacks here are dangerous: an unknown ``risk_tier`` would be
+        downgraded to TIER_2 and an unknown ``room_type`` would land the frame
+        in a GROUP room. The caller must see the error.
+        """
+        if value is None and default is not None:
+            value = default
+        if not isinstance(value, str) or value not in enum_cls.__members__:
+            allowed = ", ".join(enum_cls.__members__)
+            raise ValueError(f"{field} must be one of: {allowed}")
+        return enum_cls[value]
+
+    @staticmethod
+    def _string_argument(arguments: Dict[str, Any], key: str) -> str:
+        """Return a required, non-empty string argument without coercing."""
+        value = arguments.get(key)
+        if value is None:
+            raise ValueError(f"{key} is required")
+        if not isinstance(value, str):
+            raise ValueError(f"{key} must be a string")
+        value = value.strip()
+        if not value:
+            raise ValueError(f"{key} is required")
+        return value
+
+    def _chunk_bytes_arg(self, value: Any) -> int:
+        """Validate ``chunk_bytes``; ``_upload_archive`` clamps the range."""
+        if value is None:
+            return self._DEFAULT_CHUNK_BYTES
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError("chunk_bytes must be an integer")
+        return value
 
     def _build_single_file_archive(
         self, path: str, content: str, encoding: str
@@ -466,13 +581,17 @@ class PerunChatMCPServer:
             "perun.md",
         }:
             raise ValueError("path is sensitive and cannot be handed off")
-        if encoding == "base64":
+        enc = str(encoding or "").strip().lower()
+        if enc == "base64":
             try:
                 raw = base64.b64decode(content, validate=True)
             except Exception as exc:
                 raise ValueError(f"invalid base64 content: {exc}") from exc
-        elif encoding in ("utf-8", "utf8", ""):
-            raw = content.encode("utf-8")
+        elif enc in ("utf-8", "utf8", ""):
+            try:
+                raw = content.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise ValueError("content is not valid UTF-8") from exc
         else:
             raise ValueError("encoding must be utf-8 or base64")
         if len(raw) > self._MAX_INLINE_FILE_BYTES:
@@ -772,13 +891,18 @@ class PerunChatMCPServer:
         if name not in known:
             return _err(f"Unknown tool: {name}")
 
-        self._last_error = ""
         client = await self._ensure_client()
 
         room_id = arguments.get("room_id")
+        if not isinstance(room_id, str) or not room_id.strip():
+            return _err("room_id is required")
+        room_id = room_id.strip()
+        self._last_errors.pop(room_id, None)
         room_type_name = arguments.get("room_type", "GROUP")
-        room_type = getattr(self._RoomType, room_type_name, self._RoomType.GROUP)
         try:
+            room_type = self._enum_member(
+                self._RoomType, room_type_name, "room_type", default="GROUP"
+            )
             if name == "perunchat_join_room":
                 await client.join_room(room_id, room_type)
                 return _ok(f"Joined {room_id}")
@@ -795,8 +919,11 @@ class PerunChatMCPServer:
                 return _ok(f"Message sent to {room_id}: {frame['id']}")
             if name == "perunchat_propose_action":
                 tier_name = arguments.get("risk_tier", "TIER_2_LOW_IMPACT")
-                risk_tier = getattr(
-                    self._RiskTier, tier_name, self._RiskTier.TIER_2_LOW_IMPACT
+                risk_tier = self._enum_member(
+                    self._RiskTier,
+                    tier_name,
+                    "risk_tier",
+                    default="TIER_2_LOW_IMPACT",
                 )
                 frame = await client.submit_proposal(
                     room_id=room_id,
@@ -809,28 +936,25 @@ class PerunChatMCPServer:
                 proposal_id = frame["payload"]["proposal_id"]
                 return _ok(
                     f"Action proposal {proposal_id} staged in {room_id}. "
-                    "Approve via the dashboard, then resubmit with the token."
+                    "Another rw participant must approve it, then it can be claimed."
                 )
             if name == "perunchat_claim_execution":
-                proposal_id = str(arguments.get("proposal_id") or "").strip()
-                if not proposal_id:
-                    return _err("proposal_id is required")
-                since = self._control_seq
-                await self._send_execution(
-                    client,
-                    room_id,
-                    room_type,
-                    {"op": "claim_execution", "proposal_id": proposal_id},
-                )
-                payload = await self._wait_for_result(
-                    "claim_execution", proposal_id, since=since
-                )
+                proposal_id = self._string_argument(arguments, "proposal_id")
+                async with self._proposal_lock_for(proposal_id):
+                    since = self._control_seq
+                    await self._send_execution(
+                        client,
+                        room_id,
+                        room_type,
+                        {"op": "claim_execution", "proposal_id": proposal_id},
+                    )
+                    payload = await self._wait_for_result(
+                        "claim_execution", proposal_id, since=since, room_id=room_id
+                    )
                 return _result_response(payload)
             if name == "perunchat_request_download_package":
-                proposal_id = str(arguments.get("proposal_id") or "").strip()
-                if not proposal_id:
-                    return _err("proposal_id is required")
-                async with self._download_lock_for(proposal_id):
+                proposal_id = self._string_argument(arguments, "proposal_id")
+                async with self._proposal_lock_for(proposal_id):
                     raw_destination = arguments.get("destination")
                     try:
                         destination = self._resolve_handoff_path(
@@ -856,7 +980,7 @@ class PerunChatMCPServer:
                     since = self._control_seq
                     await self._send_execution(client, room_id, room_type, request)
                     ready = await self._wait_for_package_ready(
-                        proposal_id, since=since
+                        proposal_id, since=since, room_id=room_id
                     )
                     transfer_id = str(ready.get("transfer_id") or "")
                     try:
@@ -881,7 +1005,7 @@ class PerunChatMCPServer:
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     temp_path = destination.with_name(destination.name + ".part")
                     try:
-                        temp_path.write_bytes(archive)
+                        await asyncio.to_thread(temp_path.write_bytes, archive)
                         os.replace(temp_path, destination)
                     finally:
                         temp_path.unlink(missing_ok=True)
@@ -901,46 +1025,52 @@ class PerunChatMCPServer:
                         )
                     )
             if name == "perunchat_upload_package":
-                proposal_id = str(arguments.get("proposal_id") or "").strip()
-                zip_path = str(arguments.get("zip_path") or "").strip()
-                if not proposal_id or not zip_path:
-                    return _err("proposal_id and zip_path are required")
+                proposal_id = self._string_argument(arguments, "proposal_id")
+                zip_path = self._string_argument(arguments, "zip_path")
                 package_path = self._resolve_handoff_path(zip_path, "")
                 if not package_path.is_file():
                     return _err(f"ZIP not found: {package_path}")
-                archive = package_path.read_bytes()
-                result = await self._upload_archive(
-                    client,
-                    room_id,
-                    room_type,
-                    proposal_id,
-                    archive,
-                    int(arguments.get("chunk_bytes") or self._DEFAULT_CHUNK_BYTES),
-                )
+                archive = await asyncio.to_thread(package_path.read_bytes)
+                async with self._proposal_lock_for(proposal_id):
+                    result = await self._upload_archive(
+                        client,
+                        room_id,
+                        room_type,
+                        proposal_id,
+                        archive,
+                        self._chunk_bytes_arg(arguments.get("chunk_bytes")),
+                    )
                 return _result_response(result)
             if name == "perunchat_write_target_file":
-                proposal_id = str(arguments.get("proposal_id") or "").strip()
-                target_path = str(arguments.get("path") or "").strip()
-                if not proposal_id or not target_path:
-                    return _err("proposal_id and path are required")
+                proposal_id = self._string_argument(arguments, "proposal_id")
+                target_path = self._string_argument(arguments, "path")
+                content = arguments.get("content")
+                if content is None:
+                    content = ""
+                if not isinstance(content, str):
+                    return _err("content must be a string")
+                encoding = arguments.get("encoding")
+                if encoding is None:
+                    encoding = "utf-8"
+                if not isinstance(encoding, str):
+                    return _err("encoding must be a string")
                 archive = self._build_single_file_archive(
                     target_path,
-                    str(arguments.get("content") or ""),
-                    str(arguments.get("encoding") or "utf-8"),
+                    content,
+                    encoding,
                 )
-                result = await self._upload_archive(
-                    client,
-                    room_id,
-                    room_type,
-                    proposal_id,
-                    archive,
-                    int(arguments.get("chunk_bytes") or self._DEFAULT_CHUNK_BYTES),
-                )
+                async with self._proposal_lock_for(proposal_id):
+                    result = await self._upload_archive(
+                        client,
+                        room_id,
+                        room_type,
+                        proposal_id,
+                        archive,
+                        self._chunk_bytes_arg(arguments.get("chunk_bytes")),
+                    )
                 return _result_response(result)
             if name == "perunchat_execution_status":
-                proposal_id = str(arguments.get("proposal_id") or "").strip()
-                if not proposal_id:
-                    return _err("proposal_id is required")
+                proposal_id = self._string_argument(arguments, "proposal_id")
                 since = self._control_seq
                 await self._send_execution(
                     client,
@@ -949,13 +1079,11 @@ class PerunChatMCPServer:
                     {"op": "execution_status", "proposal_id": proposal_id},
                 )
                 payload = await self._wait_for_result(
-                    "execution_status", proposal_id, timeout=30.0, since=since
+                    "execution_status", proposal_id, timeout=30.0, since=since, room_id=room_id
                 )
                 return _result_response(payload)
             if name == "perunchat_transfer_status":
-                transfer_id = str(arguments.get("transfer_id") or "").strip()
-                if not transfer_id:
-                    return _err("transfer_id is required")
+                transfer_id = self._string_argument(arguments, "transfer_id")
                 since = self._control_seq
                 await self._send_execution(
                     client,
@@ -969,22 +1097,22 @@ class PerunChatMCPServer:
                     timeout=30.0,
                     since=since,
                     transfer_id=transfer_id,
+                    room_id=room_id,
                 )
                 return _result_response(payload)
             if name == "perunchat_revoke_execution_claim":
-                proposal_id = str(arguments.get("proposal_id") or "").strip()
-                if not proposal_id:
-                    return _err("proposal_id is required")
-                since = self._control_seq
-                await self._send_execution(
-                    client,
-                    room_id,
-                    room_type,
-                    {"op": "revoke_execution_claim", "proposal_id": proposal_id},
-                )
-                payload = await self._wait_for_result(
-                    "revoke_execution_claim", proposal_id, timeout=30.0, since=since
-                )
+                proposal_id = self._string_argument(arguments, "proposal_id")
+                async with self._proposal_lock_for(proposal_id):
+                    since = self._control_seq
+                    await self._send_execution(
+                        client,
+                        room_id,
+                        room_type,
+                        {"op": "revoke_execution_claim", "proposal_id": proposal_id},
+                    )
+                    payload = await self._wait_for_result(
+                        "revoke_execution_claim", proposal_id, timeout=30.0, since=since, room_id=room_id
+                    )
                 return _result_response(payload)
         except Exception as exc:
             return _err(f"PerunChat bridge error: {exc}")

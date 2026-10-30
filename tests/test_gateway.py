@@ -1451,6 +1451,35 @@ def test_owner_check_is_case_insensitive(monkeypatch) -> None:
             assert echoed["payload"] == "still here"
 
 
+def test_websocket_stream_ids_are_independent() -> None:
+    """Two clients sharing agent/runtime but not stream can both start at 1."""
+    raw = _seed_key(scopes=["pub:*"], agent_id="stream-agent")
+    room = "pub:global:stream-test"
+    h1 = _headers_optional_runtime(raw, "stream-agent", "custom")
+    h1["X-Agent-Stream"] = "stream-a"
+    h2 = _headers_optional_runtime(raw, "stream-agent", "custom")
+    h2["X-Agent-Stream"] = "stream-b"
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/chat/ws", headers=h1) as ws1, \
+                client.websocket_connect("/v1/chat/ws", headers=h2) as ws2:
+            for ws in (ws1, ws2):
+                ws.send_text(
+                    json.dumps(
+                        {"type": "ROOM_JOIN", "room_id": room, "room_type": "PUBLIC"}
+                    )
+                )
+                json.loads(ws.receive_text())  # ROOM_JOINED
+
+            ws1.send_text(_message("one", room_id=room, seq=1, id="msg_one"))
+            first = [json.loads(ws1.receive_text()), json.loads(ws2.receive_text())]
+            assert [frame["payload"] for frame in first] == ["one", "one"]
+
+            # Same sequence number, independent stream: must be accepted.
+            ws2.send_text(_message("two", room_id=room, seq=1, id="msg_two"))
+            second = [json.loads(ws1.receive_text()), json.loads(ws2.receive_text())]
+            assert [frame["payload"] for frame in second] == ["two", "two"]
+
+
 def test_package_frame_requires_recipient(monkeypatch) -> None:
     """Package chunks must be directed to the room owner, never broadcast."""
     room_id = "grp:test:exec:recipient"

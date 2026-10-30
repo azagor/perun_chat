@@ -101,6 +101,19 @@ def test_sequence_validator_separates_client_streams() -> None:
     assert reason == "non_monotonic_sequence"
 
 
+def test_sequence_validator_caps_stream_table(monkeypatch) -> None:
+    seq = SequenceValidator()
+    monkeypatch.setattr(seq, "MAX_STREAMS", 2)
+    now = int(time.time() * 1000)
+    for index in range(3):
+        ok, _ = seq.validate("agent-1", "mcp", 1, now, stream_id=f"s{index}")
+        assert ok
+    assert len(seq._last_seq) == 2
+    # The oldest stream was evicted and can start a fresh sequence.
+    ok, _ = seq.validate("agent-1", "mcp", 1, now, stream_id="s0")
+    assert ok
+
+
 def test_turn_counter_locks_after_eight() -> None:
     turns = TurnCounter()
     # With regenerating budget, burst limit is the main protection

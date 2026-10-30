@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from perunchat import __version__
 from perunchat.client import PerunChatClient, RiskTier, RoomType
 
 
@@ -39,7 +40,7 @@ async def test_connect_uses_correct_headers(client: PerunChatClient) -> None:
     assert headers["Authorization"] == "Bearer prn_live_secret"
     assert headers["X-Agent-ID"] == "test-agent"
     assert headers["X-Agent-Runtime"] == "perun"
-    assert headers["X-Agent-Version"] == "0.4.8"
+    assert headers["X-Agent-Version"] == __version__
     assert headers["X-Agent-Stream"] == client.stream_id
 
 
