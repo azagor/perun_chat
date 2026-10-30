@@ -20,7 +20,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, Optional, Set, Tuple
 
-from fastapi import Depends, FastAPI, Header, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 logger = logging.getLogger("perunchat.gateway")
@@ -396,6 +397,14 @@ app = FastAPI(
 )
 app.include_router(router)
 
+
+@app.middleware("http")
+async def _origin_guard(request: Request, call_next):
+    """Apply the browser-origin allowlist to REST routes as well as the WS."""
+    if not _origin_ok(request.headers.get("origin")):
+        return JSONResponse({"detail": "origin_not_allowed"}, status_code=403)
+    return await call_next(request)
+
 # Serve the social-manager dashboard at /dashboard/social/.
 _dashboard_dir = Path(__file__).resolve().parent / "dashboard"
 if (_dashboard_dir / "social_manager.html").exists():
@@ -515,24 +524,6 @@ async def handle_ws(
     bad_frames = 0
 
     watchdog: "asyncio.Task[None] | None" = None
-    if token:
-        async def _revocation_watchdog() -> None:
-            while True:
-                await asyncio.sleep(_AUTH_RECHECK_SECONDS)
-                try:
-                    current = await asyncio.to_thread(
-                        gateway.keystore.authenticate, token
-                    )
-                except Exception:
-                    current = None
-                if current is None:
-                    try:
-                        await ws.close(code=1008, reason="key_revoked")
-                    except Exception:
-                        pass
-                    return
-
-        watchdog = asyncio.create_task(_revocation_watchdog())
 
     if agent_id:
         became_online = gateway.mark_online(agent_id, ws)
@@ -543,6 +534,25 @@ async def handle_ws(
                 pass
 
     try:
+        if token:
+            async def _revocation_watchdog() -> None:
+                while True:
+                    await asyncio.sleep(_AUTH_RECHECK_SECONDS)
+                    try:
+                        current = await asyncio.to_thread(
+                            gateway.keystore.authenticate, token
+                        )
+                    except Exception:
+                        current = None
+                    if current is None:
+                        try:
+                            await ws.close(code=1008, reason="key_revoked")
+                        except Exception:
+                            pass
+                        return
+
+            watchdog = asyncio.create_task(_revocation_watchdog())
+
         while True:
             raw = await ws.receive_text()
             too_large = len(raw) > frame_limit
@@ -1159,6 +1169,9 @@ def main() -> None:
         port=config.api_bind_port(),
         reload=False,
         ws_max_size=MAX_FRAME_BYTES,
+        # Access logs include the raw query string; clients may pass ?token=.
+        # Nginx keeps an access log with the query stripped.
+        access_log=False,
     )
 
 

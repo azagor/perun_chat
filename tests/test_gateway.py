@@ -2055,3 +2055,91 @@ def test_malformed_approval_fields_do_not_crash_socket(
             assert reply["type"] == "ERROR"
             # Socket is still usable.
             _join_room(ws)
+
+def test_origin_allowlist_rejects_foreign_origin(monkeypatch) -> None:
+    import perunchat.gateway as gateway_module
+
+    monkeypatch.setattr(
+        gateway_module, "_ALLOWED_ORIGINS", frozenset({"https://chat.example"})
+    )
+    key = _seed_key()
+    with TestClient(app) as client:
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(
+                "/v1/chat/ws",
+                headers={**_headers(key), "Origin": "https://evil.example"},
+            ):
+                pass
+
+
+def test_origin_allowlist_allows_configured_origin(monkeypatch) -> None:
+    import perunchat.gateway as gateway_module
+
+    monkeypatch.setattr(
+        gateway_module, "_ALLOWED_ORIGINS", frozenset({"https://chat.example"})
+    )
+    key = _seed_key()
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/v1/chat/ws",
+            headers={**_headers(key), "Origin": "https://CHAT.example/"},
+        ) as ws:
+            assert ws
+
+
+def test_pre_parse_frame_limit_closes_connection() -> None:
+    key = _seed_key()
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/chat/ws", headers=_headers(key)) as ws:
+            ws.send_text("x" * 40_000)
+            with pytest.raises(WebSocketDisconnect) as exc:
+                ws.receive_text()
+            assert exc.value.code == 1009
+
+
+def test_unknown_client_keys_are_stripped() -> None:
+    key = _seed_key()
+    key_b = _seed_key(agent_id="other-agent")
+    room = "pub:strip-test"
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/chat/ws", headers=_headers(key)) as a, \
+                client.websocket_connect(
+                    "/v1/chat/ws", headers=_headers(key_b, agent_id="other-agent")
+                ) as b:
+            _join_room(a, room)
+            _join_room(b, room)
+            a.send_text(
+                _message(
+                    "hello",
+                    room_id=room,
+                    seq=1,
+                    metadata="x" * 100,
+                    _approval_validated=True,
+                )
+            )
+            received = json.loads(b.receive_text())
+            assert received["payload"] == "hello"
+            assert "metadata" not in received
+            assert "_approval_validated" not in received
+
+
+def test_room_cap_rejects_51st_join() -> None:
+    from perunchat.gateway import _MAX_ROOMS_PER_CONN
+
+    key = _seed_key(scopes=["pub:*"])
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/chat/ws", headers=_headers(key)) as ws:
+            for index in range(_MAX_ROOMS_PER_CONN):
+                _join_room(ws, f"pub:cap:{index}")
+            ws.send_text(
+                json.dumps(
+                    {
+                        "type": "ROOM_JOIN",
+                        "room_id": "pub:cap:overflow",
+                        "room_type": "PUBLIC",
+                    }
+                )
+            )
+            reply = json.loads(ws.receive_text())
+            assert reply["type"] == "ERROR"
+            assert reply["message"] == "too_many_rooms"

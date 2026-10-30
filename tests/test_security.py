@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 import pytest
 
 from perunchat.security import (
+    AuthRateLimiter,
     DLPScanner,
     RateLimiter,
     SequenceValidator,
@@ -203,3 +205,22 @@ async def test_auth_rate_limiter_blocks_after_five_failures() -> None:
     assert not await pipeline.check_auth_allowed("ip-1")
     # Other identifiers unaffected
     assert await pipeline.check_auth_allowed("ip-2")
+
+
+
+@pytest.mark.asyncio
+async def test_auth_limiter_attempt_is_atomic():
+    limiter = AuthRateLimiter(capacity=5, window_seconds=60)
+    results = await asyncio.gather(*(limiter.attempt("x") for _ in range(50)))
+    assert sum(1 for allowed in results if allowed) == 5
+
+
+@pytest.mark.asyncio
+async def test_auth_limiter_prunes_expired_keys(monkeypatch):
+    limiter = AuthRateLimiter(capacity=5, window_seconds=1)
+    now = time.time()
+    monkeypatch.setattr(time, "time", lambda: now)
+    await limiter.record_failure("old")
+    now += 10
+    await limiter.attempt("new")
+    assert "old" not in limiter._failures

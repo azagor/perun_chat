@@ -4,6 +4,20 @@
 
 _No unreleased changes yet._
 
+## 0.4.12 - 2026-10-30
+
+### Fixed
+
+- **Query-string credentials are no longer written to the app access log.**
+  Uvicorn's access log is disabled because it records `?token=...`; nginx keeps
+  the request log with the query stripped.
+- **REST routes honour the origin allowlist** via HTTP middleware, matching the
+  WebSocket check.
+- **Auth/sequence state is pruned periodically** instead of on every call,
+  keeping the hot path bounded under identifier/nonce churn.
+- The revocation watchdog is created inside the connection `try` block so a
+  pre-loop error cannot leave it running.
+
 ## 0.4.11 - 2026-10-30
 
 ### Fixed

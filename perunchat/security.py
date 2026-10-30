@@ -169,6 +169,7 @@ class SequenceValidator:
     def __init__(self) -> None:
         self._last_seq: OrderedDict[str, int] = OrderedDict()
         self._seen_nonces: Dict[str, int] = {}
+        self._prune_ops = 0
 
     def _prune_nonces(self, now_ms: int) -> None:
         cutoff = now_ms - self.MAX_SKEW_MS * 2
@@ -193,7 +194,9 @@ class SequenceValidator:
         if abs(now_ms - timestamp_ms) > self.MAX_SKEW_MS:
             return False, "timestamp_skew"
 
-        self._prune_nonces(now_ms)
+        self._prune_ops += 1
+        if self._prune_ops % 100 == 0 or len(self._seen_nonces) > 10_000:
+            self._prune_nonces(now_ms)
         nonce_key = f"{agent_id}:{runtime}:{nonce}" if nonce is not None else ""
         if nonce is not None and nonce_key in self._seen_nonces:
             return False, "duplicate_nonce"
@@ -378,6 +381,18 @@ class AuthRateLimiter:
         self.window_seconds = window_seconds
         self._failures: Dict[str, List[float]] = {}
         self._lock = asyncio.Lock()
+        self._ops = 0
+        self._last_prune = 0.0
+
+    def _maybe_prune_locked(self, now: float) -> None:
+        self._ops += 1
+        if (
+            now - self._last_prune >= max(self.window_seconds, 5.0)
+            or self._ops % 100 == 0
+            or len(self._failures) > self.MAX_KEYS
+        ):
+            self._last_prune = now
+            self._prune_locked(now)
 
     def _prune_locked(self, now: float) -> None:
         cutoff = now - self.window_seconds
@@ -398,7 +413,7 @@ class AuthRateLimiter:
     async def record_failure(self, identifier: str) -> None:
         now = time.time()
         async with self._lock:
-            self._prune_locked(now)
+            self._maybe_prune_locked(now)
             window = self._failures.get(identifier, [])
             cutoff = now - self.window_seconds
             recent = [t for t in window if t >= cutoff]
@@ -408,7 +423,7 @@ class AuthRateLimiter:
     async def is_allowed(self, identifier: str) -> bool:
         now = time.time()
         async with self._lock:
-            self._prune_locked(now)
+            self._maybe_prune_locked(now)
             window = self._failures.get(identifier, [])
             cutoff = now - self.window_seconds
             recent = [t for t in window if t >= cutoff]
@@ -426,7 +441,7 @@ class AuthRateLimiter:
         """
         now = time.time()
         async with self._lock:
-            self._prune_locked(now)
+            self._maybe_prune_locked(now)
             cutoff = now - self.window_seconds
             recent = [t for t in self._failures.get(identifier, []) if t >= cutoff]
             allowed = len(recent) < self.capacity
@@ -645,3 +660,4 @@ __all__ = [
     "AuthRateLimiter",
     "generate_api_key",
 ]
+
