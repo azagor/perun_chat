@@ -164,9 +164,10 @@ creation time:
   client from blocking delivery to the rest of the room; timed-out sockets are
   dropped. A replaying socket that accumulates more than `_MAX_PENDING` (200)
   queued frames is disconnected so it can reconnect, and each connection is
-  capped at `_MAX_ROOMS_PER_CONN` rooms. Rooms that have been empty and idle for
-  10 minutes are reaped, so arbitrary `pub:` ids cannot grow memory without
-  bound. Replay sorts by a NaN-safe timestamp key, so one malformed stored frame
+  capped at `_MAX_ROOMS_PER_CONN` rooms. Empty rooms that never carried traffic
+  are reclaimed after 10 idle minutes, so arbitrary `pub:` ids cannot grow memory
+  without bound while a channel's replay buffer is preserved. Replay sorts by a
+  NaN-safe timestamp key, so one malformed stored frame
   cannot abort every later joiner. Replayed frames keep the original message
   ``id`` and ``sender``
   object (including ``runtime``), so clients can deduplicate by id without

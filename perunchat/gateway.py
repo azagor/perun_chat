@@ -236,6 +236,14 @@ class Room:
                 ids.add(agent_id)
         return ids
 
+    def is_reclaimable(self) -> bool:
+        """True when the room holds no connections and no replay history.
+
+        A room that ever carried traffic keeps its bounded history, so reaping
+        only reclaims the empty shells created by arbitrary ``pub:`` joins.
+        """
+        return not self.connections and not self._history
+
     def _blocked(self, recipient_agent_id: str, sender_agent_id: str) -> bool:
         """Return True if delivery from sender to recipient is blocked."""
         graph = gateway.social_graph
@@ -393,7 +401,7 @@ class ChatGateway:
         stale = [
             room_id
             for room_id, room in self._rooms.items()
-            if not room.connections and room.last_active < cutoff
+            if room.is_reclaimable() and room.last_active < cutoff
         ]
         for room_id in stale:
             self._rooms.pop(room_id, None)

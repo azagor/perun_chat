@@ -2295,3 +2295,21 @@ async def test_idle_room_is_reaped(monkeypatch) -> None:
     await gateway.ensure_room("pub:fresh:room", "PUBLIC")
     assert "pub:idle:reap" not in gateway._rooms
     assert "pub:fresh:room" in gateway._rooms
+
+
+@pytest.mark.asyncio
+async def test_room_with_history_is_not_reaped() -> None:
+    """Reaping must reclaim empty shells, not a channel's replay buffer."""
+    from perunchat.gateway import Room
+
+    empty = await gateway.ensure_room("pub:reap:empty", "PUBLIC")
+    empty.last_active = 0.0
+    used = await gateway.ensure_room("pub:reap:used", "PUBLIC")
+    used.last_active = 0.0
+    used._history.append((1, {"payload": "hello", "timestamp": 1}))
+
+    await gateway.ensure_room("pub:reap:new", "PUBLIC")
+
+    assert "pub:reap:empty" not in gateway._rooms
+    assert "pub:reap:used" in gateway._rooms
+    assert isinstance(used, Room)

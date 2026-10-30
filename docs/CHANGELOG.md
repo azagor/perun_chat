@@ -32,7 +32,9 @@
   the root handoff directory is refused as a file destination.
 - **Gateway resource limits.** Added a per-connection frame token bucket
   (`frame_rate_limited`), an idle-room sweep that finally calls `drop_room`, and
-  `TokenBucket` now starts full for its configured capacity.
+  `TokenBucket` now starts full for its configured capacity. The sweep only
+  reclaims rooms that never carried traffic, so a channel's replay buffer is
+  preserved.
 
 ## 0.4.17 - 2026-10-30
 
