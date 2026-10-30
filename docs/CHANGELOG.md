@@ -4,6 +4,14 @@
 
 _No unreleased changes yet._
 
+## 0.4.11 - 2026-10-30
+
+### Fixed
+
+- **Directed delivery is case-insensitive.** `Room.broadcast` normalises
+  `recipient_id` before matching connections, so an owner-addressed package
+  frame with `recipient_id="OWNER"` is delivered the same as `"owner"`.
+
 ## 0.4.10 - 2026-10-30
 
 ### Fixed

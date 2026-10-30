@@ -161,7 +161,7 @@ class Room:
 
     async def broadcast(self, sender: WebSocket, frame: Dict[str, Any]) -> None:
         sender_agent_id = self.connections.get(sender)
-        recipient_id = str(frame.get("recipient_id") or "").strip()
+        recipient_id = str(frame.get("recipient_id") or "").strip().lower()
         directed = bool(recipient_id)
         message = json.dumps(frame, ensure_ascii=False)
         self._seq += 1
