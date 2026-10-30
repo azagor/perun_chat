@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+_No unreleased changes yet._
+
+## 0.4.19 - 2026-10-30
+
+### Fixed
+
+- The idle-room sweep only reclaims rooms that never carried traffic, so a
+  channel's replay buffer survives an idle period.
+
+## 0.4.18 - 2026-10-30
+
 ### Fixed
 
 - **DLP no longer corrupts technical text.** The high-entropy heuristic used to
