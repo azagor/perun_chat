@@ -283,3 +283,39 @@ def test_token_bucket_starts_full_for_its_capacity() -> None:
     bucket = TokenBucket(capacity=3, refill_per_second=0)
     assert [bucket.consume(now=0) for _ in range(3)] == [True, True, True]
     assert bucket.consume(now=0) is False
+
+
+def test_token_bucket_ignores_a_backwards_clock_step() -> None:
+    bucket = TokenBucket(capacity=5, refill_per_second=10)
+    assert bucket.consume(now=bucket._last_update) is True
+    before = bucket._tokens
+    # A clock step backwards must not subtract tokens.
+    assert bucket.consume(now=bucket._last_update - 100) is True
+    assert bucket._tokens == before - 1
+
+
+def test_scan_egress_blocks_but_preserves_a_document_body() -> None:
+    pipeline = SecurityPipeline()
+    body = "example: token=abcdefgh12345"
+    frame = {"payload": {"op": "create", "content": body}}
+    safe = pipeline.scan_egress(frame)
+    assert safe["payload"]["content"] == body
+    assert safe["_dlp_blocked"]
+    assert "dlp_regex:env_assignment" in safe["_dlp_blocked"]
+
+
+def test_scan_egress_blocks_a_credential_inside_details() -> None:
+    pipeline = SecurityPipeline()
+    details = {"content": "key: prn_live_" + "a1b2c3d4" * 6}
+    frame = {"payload": {"op": "create", "details": details}}
+    safe = pipeline.scan_egress(frame)
+    assert safe["payload"]["details"]["content"] == details["content"]
+    assert safe["_dlp_blocked"]
+
+
+def test_scan_egress_still_redacts_short_protocol_fields() -> None:
+    pipeline = SecurityPipeline()
+    frame = {"payload": {"op": "note", "text": "token prn_live_" + "a1b2c3d4" * 6}}
+    safe = pipeline.scan_egress(frame)
+    assert "prn_live_" not in safe["payload"]["text"]
+    assert not safe.get("_dlp_blocked")

@@ -175,7 +175,9 @@ class TokenBucket:
     def consume(self, now: Optional[float] = None) -> bool:
         if now is None:
             now = time.time()
-        elapsed = now - self._last_update
+        # Clamp: a backwards clock step (NTP) must not subtract tokens, which
+        # would lock the caller out until the clock caught up.
+        elapsed = max(0.0, now - self._last_update)
         self._tokens = min(self.capacity, self._tokens + elapsed * self.refill_per_second)
         self._last_update = now
         if self._tokens >= 1.0:
@@ -635,20 +637,29 @@ class SecurityPipeline:
             content_type=content_type,
         )
 
+    # Payload keys that carry a document body an executor must consume verbatim.
+    # These are never rewritten: a silent edit would make the approved text differ
+    # from the written text. A detected credential blocks the frame instead.
+    DOCUMENT_KEYS = frozenset({"content", "body", "file_content", "details"})
+
     def scan_egress(self, frame: Dict[str, Any]) -> Dict[str, Any]:
         """Return a copy of the frame with labelled credential redaction applied.
 
         Only *labelled* secret patterns (API keys, private keys, ``NAME=value``
-        assignments) are rewritten. The fuzzy high-entropy heuristic runs in
-        detect-only mode, because rewriting it previously corrupted ordinary
-        technical text — filenames, identifiers, base64 patches — so the
-        proposal the executor received no longer matched the approved body.
+        assignments) are rewritten, and only in chat text and short protocol
+        fields. The high-entropy heuristic runs in detect-only mode, because
+        rewriting it previously corrupted filenames, identifiers and base64
+        patches. Document bodies (``content``/``body``/``file_content``/
+        ``details``) are never mutated: on a labelled hit the frame is marked
+        ``_dlp_blocked`` so the caller can reject it, which keeps the approved
+        body and the written body byte-identical.
         """
         import copy
 
         safe = copy.deepcopy(frame)
         payload = safe.get("payload")
         alerts: List[str] = []
+        blocked: List[str] = []
         changed = False
         if isinstance(payload, str):
             scanned, alerts = self.dlp.scan(payload)
@@ -658,14 +669,29 @@ class SecurityPipeline:
         elif isinstance(payload, dict):
             for key, value in payload.items():
                 if isinstance(value, str):
+                    if key in self.DOCUMENT_KEYS:
+                        _, found = self.dlp.scan(value)
+                        alerts.extend(found)
+                        blocked.extend(a for a in found if a.startswith("dlp_regex:"))
+                        continue
                     scanned, found = self.dlp.scan(value)
                     alerts.extend(found)
                     if scanned != value:
                         payload[key] = scanned
                         changed = True
+                elif key in self.DOCUMENT_KEYS and isinstance(value, dict):
+                    for nested in value.values():
+                        if isinstance(nested, str):
+                            _, found = self.dlp.scan(nested)
+                            alerts.extend(found)
+                            blocked.extend(
+                                a for a in found if a.startswith("dlp_regex:")
+                            )
         if alerts:
             existing = safe.get("_security_alerts") or []
             safe["_security_alerts"] = list(dict.fromkeys([*existing, *alerts]))
+        if blocked:
+            safe["_dlp_blocked"] = sorted(set(blocked))
         if changed:
             safe["_dlp_redacted"] = True
         return safe

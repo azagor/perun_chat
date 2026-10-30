@@ -4,6 +4,18 @@
 
 _No unreleased changes yet._
 
+## 0.4.20 - 2026-10-30
+
+### Fixed
+
+- **Document bodies are never rewritten by DLP.** `content`, `body`,
+  `file_content` and `details` are scanned for detection only; a labelled
+  credential inside one now blocks the frame with `dlp_blocked` instead of being
+  silently edited, so an executor always receives the approved text verbatim.
+- **A backwards clock step no longer drains a token bucket.** `TokenBucket`
+  clamps elapsed time to zero, so an NTP adjustment cannot lock a client out with
+  `frame_rate_limited`.
+
 ## 0.4.19 - 2026-10-30
 
 ### Fixed

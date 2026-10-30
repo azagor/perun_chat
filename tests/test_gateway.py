@@ -2313,3 +2313,37 @@ async def test_room_with_history_is_not_reaped() -> None:
     assert "pub:reap:empty" not in gateway._rooms
     assert "pub:reap:used" in gateway._rooms
     assert isinstance(used, Room)
+
+
+def test_document_body_with_a_credential_is_blocked_not_rewritten(monkeypatch) -> None:
+    """A proposal body must never be silently edited; block the frame instead."""
+    room_id = "grp:test:managed:dlp"
+    key = _create_managed_room(room_id, "manager", monkeypatch)
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/v1/chat/ws", headers=_headers_optional_runtime(key, "manager", "perun")
+        ) as ws:
+            ws.send_text(
+                json.dumps({"type": "ROOM_JOIN", "room_id": room_id, "room_type": "GROUP"})
+            )
+            json.loads(ws.receive_text())  # ROOM_JOINED
+
+            body = "# notes\n\nexample: token=abcdefgh12345\n"
+            ws.send_text(
+                json.dumps(
+                    _execution_frame(room_id, 2, {"op": "note", "content": body})
+                )
+            )
+            reply = json.loads(ws.receive_text())
+            assert reply["type"] == "ERROR"
+            assert reply["message"] == "dlp_blocked"
+
+            # The same document with no credential passes through verbatim.
+            clean = "# notes\n\nexample: see the docs\n"
+            ws.send_text(
+                json.dumps(
+                    _execution_frame(room_id, 3, {"op": "note", "content": clean})
+                )
+            )
+            echo = json.loads(ws.receive_text())
+            assert echo["payload"]["content"] == clean

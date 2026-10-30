@@ -1179,8 +1179,29 @@ async def handle_ws(
             else:
                 safe_frame = gateway.security.scan_egress(frame)
 
+            # A document body is never rewritten (the executor must receive the
+            # approved text byte-for-byte), so a labelled credential inside one
+            # blocks the frame instead of being silently edited.
+            blocked = safe_frame.pop("_dlp_blocked", None)
+            if blocked:
+                await ws.send_text(
+                    json.dumps(
+                        {
+                            "type": "ERROR",
+                            "message": "dlp_blocked",
+                            "room_id": room_id,
+                            "detail": (
+                                "a document body contains something that looks like "
+                                "a credential; rephrase it or send it outside chat"
+                            ),
+                            "alerts": blocked,
+                        }
+                    )
+                )
+                continue
+
             # Strip internal state keys that clients must never set themselves.
-            for _internal_key in ("_approval_validated", "_staged_at"):
+            for _internal_key in ("_approval_validated", "_staged_at", "_dlp_redacted"):
                 safe_frame.pop(_internal_key, None)
 
             # If this is a proposal, either stage it (token-less) or validate the

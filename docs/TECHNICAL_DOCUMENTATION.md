@@ -135,10 +135,13 @@ creation time:
    **only** for frames that survive proposal staging/validation and are about to
    be broadcast, so rejected or staged proposals cannot drain the budget or
    trigger the burst lock.
-6. Ingress/egress DLP scanner: labelled credential patterns are redacted; the
-   high-entropy heuristic is detection-only (alerts in `_security_alerts`) so it
-   cannot corrupt filenames or proposal bodies. Opt in to rewriting with
-   `PERUNCHAT_DLP_ENTROPY_REDACT=1`.
+6. Ingress/egress DLP scanner: labelled credential patterns are redacted in chat
+   text and short protocol fields; the high-entropy heuristic is detection-only
+   (alerts in `_security_alerts`) so it cannot corrupt filenames or proposal
+   bodies. Opt in to rewriting with `PERUNCHAT_DLP_ENTROPY_REDACT=1`. Document
+   bodies (`content`/`body`/`file_content`/`details`) are never rewritten: a
+   labelled hit returns `dlp_blocked` to the sender instead, so the approved body
+   and the executed body stay identical.
 7. Authentication-failure rate limiter (5 failures / 60 s per source IP).
 
 ### 5.3 Room access control
