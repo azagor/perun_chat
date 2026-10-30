@@ -14,6 +14,7 @@ import copy
 import json
 import logging
 import os
+import re
 import time
 from collections import deque
 from contextlib import asynccontextmanager
@@ -25,6 +26,31 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 logger = logging.getLogger("perunchat.gateway")
+
+
+class _TokenRedactionFilter(logging.Filter):
+    """Strip query-string credentials from uvicorn log records."""
+
+    _PATTERN = re.compile(r"(token=)[^&\s\"']+")
+
+    @classmethod
+    def _redact(cls, value):
+        if isinstance(value, str):
+            return cls._PATTERN.sub(r"\1***", value)
+        return value
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = self._redact(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(self._redact(arg) for arg in record.args)
+        elif isinstance(record.args, dict):
+            record.args = {k: self._redact(v) for k, v in record.args.items()}
+        return True
+
+
+def _install_log_redaction() -> None:
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        logging.getLogger(name).addFilter(_TokenRedactionFilter())
 
 from . import config, db as db_module
 from . import __version__
@@ -1158,6 +1184,8 @@ async def handle_ws(
 
 def main() -> None:
     import uvicorn
+
+    _install_log_redaction()
 
     # Enforce the same raw-frame cap at the WebSocket transport layer as a
     # defense-in-depth guard. The receive-loop check already rejects oversized

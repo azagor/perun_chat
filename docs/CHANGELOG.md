@@ -4,6 +4,14 @@
 
 _No unreleased changes yet._
 
+## 0.4.13 - 2026-10-30
+
+### Fixed
+
+- **Query-string credentials are redacted from uvicorn records.** Uvicorn logs
+  the WebSocket path independently of the access log, so a filter now rewrites
+  `token=...` to `token=***` on `uvicorn`, `uvicorn.error` and `uvicorn.access`.
+
 ## 0.4.12 - 2026-10-30
 
 ### Fixed

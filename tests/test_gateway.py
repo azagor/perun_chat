@@ -2143,3 +2143,21 @@ def test_room_cap_rejects_51st_join() -> None:
             reply = json.loads(ws.receive_text())
             assert reply["type"] == "ERROR"
             assert reply["message"] == "too_many_rooms"
+
+def test_token_redaction_filter_hides_query_credentials() -> None:
+    import logging
+    from perunchat.gateway import _TokenRedactionFilter
+
+    record = logging.LogRecord(
+        "uvicorn.error",
+        logging.INFO,
+        __file__,
+        0,
+        "WebSocket %s [accepted]",
+        ("/v1/chat/ws?token=prn_live_secret",),
+        None,
+    )
+    assert _TokenRedactionFilter().filter(record) is True
+    message = record.getMessage()
+    assert "prn_live_secret" not in message
+    assert "token=***" in message
