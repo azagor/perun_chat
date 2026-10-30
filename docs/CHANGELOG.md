@@ -2,7 +2,37 @@
 
 ## Unreleased
 
-_No unreleased changes yet._
+### Fixed
+
+- **DLP no longer corrupts technical text.** The high-entropy heuristic used to
+  rewrite any 24+ character token into `[REDACTED_SECRET]`, which turned
+  filenames like `docs/HARDENING_BACKLOG_PART3.md` into placeholders inside chat
+  messages and proposal bodies. Entropy hits are now **detection only** (alerts
+  via `_security_alerts`); labelled credential patterns still redact. Set
+  `PERUNCHAT_DLP_ENTROPY_REDACT=1` to restore rewriting. Identifier/path/extension
+  shapes are never treated as secrets.
+- **NaN/Infinity frame timestamps are rejected at parse time** and the replay
+  sort key is now exception-safe, so one poisoned frame can no longer break
+  history replay for every later joiner.
+- **Reconnects tear down the previous socket.** `connect()` closes any existing
+  connection before connecting and cleans up if a room rejoin fails, which
+  previously leaked sockets and listeners (duplicate delivery, parallel
+  reconnect loops). A listener cancelled during shutdown no longer reconnects.
+- **Download integrity is mandatory.** A `package_ready` without a 64-hex
+  `sha256` and a positive `total_size` is rejected instead of silently skipping
+  the size/digest checks.
+- **Package slot eviction releases buffered bytes** and the room-owner id is
+  pinned to the first sender, so a later frame cannot redirect outgoing calls.
+- **Result waiting scans frames before raising a stale gateway error**, and
+  result frames must match `op` and `proposal_id` exactly.
+- **Handoff paths are validated by segment.** `"."` now raises `ValueError`
+  instead of `IndexError`, and `./.git/x`, `sub/opencode.json`, `a/NUL.txt`,
+  `docs/a.md:stream` and trailing-dot/space names are rejected.
+- **Single-file packages are byte-deterministic** (pinned `ZipInfo` metadata) and
+  the root handoff directory is refused as a file destination.
+- **Gateway resource limits.** Added a per-connection frame token bucket
+  (`frame_rate_limited`), an idle-room sweep that finally calls `drop_room`, and
+  `TokenBucket` now starts full for its configured capacity.
 
 ## 0.4.17 - 2026-10-30
 

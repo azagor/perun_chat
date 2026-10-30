@@ -39,6 +39,7 @@ logger = logging.getLogger("perunchat.mcp_bridge")
 # the tool boundary so malformed ids cannot allocate lock entries or reach the
 # wire; empty ids stay allowed for ops that do not use them (transfer_status).
 _PROPOSAL_ID_RE = re.compile(r"prop_[0-9a-f]{12}")
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 try:
     from mcp.server import Server
@@ -147,29 +148,58 @@ class PerunChatMCPServer:
                 or payload.get("op") == "package_ready"
             ):
                 # The gateway only permits these from the managed-room owner.
+                # Pin the first owner id seen for a room: a later frame must not
+                # be able to redirect our outgoing frames (proposals, uploads)
+                # to a different recipient.
                 room_key = str(frame.get("room_id") or "").strip()
                 if room_key:
-                    self._perun_agent_ids[room_key] = sender_id
+                    known = self._perun_agent_ids.get(room_key)
+                    if known is None:
+                        self._perun_agent_ids[room_key] = sender_id
+                    elif known != sender_id:
+                        logger.warning(
+                            "Ignoring owner id change in %s: %s -> %s",
+                            room_key,
+                            known,
+                            sender_id,
+                        )
             if (
                 content_type == self._EXECUTION_CONTENT_TYPE
                 and payload.get("op") == "package_ready"
                 and payload.get("transfer_id")
             ):
                 transfer_id = str(payload["transfer_id"])
-                self._expected_downloads[transfer_id] = time.time()
+                digest = str(payload.get("sha256") or "").strip().lower()
                 try:
-                    self._expected_chunks[transfer_id] = int(
-                        payload.get("total_chunks") or 0
-                    )
+                    total_size = int(payload.get("total_size") or 0)
                 except (TypeError, ValueError):
-                    self._expected_chunks[transfer_id] = 0
+                    total_size = 0
+                if not _SHA256_RE.fullmatch(digest) or total_size <= 0:
+                    # Never register a transfer whose integrity cannot be
+                    # verified: the download tool would otherwise have to
+                    # either skip the check or accept unverifiable bytes.
+                    if len(self._package_errors) < self._MAX_PACKAGE_TRANSFERS * 4:
+                        self._package_errors[transfer_id] = (
+                            "package_ready missing a valid sha256/total_size"
+                        )
+                    self._expected_downloads.pop(transfer_id, None)
+                else:
+                    self._expected_downloads.setdefault(transfer_id, time.time())
+                    try:
+                        self._expected_chunks[transfer_id] = int(
+                            payload.get("total_chunks") or 0
+                        )
+                    except (TypeError, ValueError):
+                        self._expected_chunks[transfer_id] = 0
                 if len(self._expected_downloads) > self._MAX_PACKAGE_TRANSFERS:
                     oldest = min(
                         self._expected_downloads,
                         key=self._expected_downloads.get,
                     )
-                    self._expected_downloads.pop(oldest, None)
-                    self._expected_chunks.pop(oldest, None)
+                    # Drop the whole slot, not just the expectation: buffered
+                    # chunks and their byte accounting must be released or the
+                    # local package budget stays permanently consumed.
+                    self._drop_package(oldest)
                     self._package_errors[oldest] = (
                         "evicted: too many concurrent transfers"
                     )
@@ -279,7 +309,9 @@ class PerunChatMCPServer:
         else:
             candidate = root / default_name
         candidate = candidate.resolve()
-        if candidate != root and root not in candidate.parents:
+        if candidate == root:
+            raise ValueError(f"handoff path must name a file inside {root}")
+        if root not in candidate.parents:
             raise ValueError(f"handoff path must be inside {root}")
         return candidate
 
@@ -326,12 +358,8 @@ class PerunChatMCPServer:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + max(timeout, 0.1)
         while True:
-            if room_id:
-                error = self._last_errors.pop(room_id, "")
-                if error:
-                    raise RuntimeError(
-                        f"PerunChat gateway rejected the frame: {error}"
-                    )
+            # Scan first: a matching result frame wins over an error that was
+            # raised by an earlier, unrelated call in this room.
             for frame in list(self._control_frames):
                 if int(frame.get("_mcp_seq") or 0) <= since:
                     continue
@@ -340,7 +368,15 @@ class PerunChatMCPServer:
                         self._control_frames.remove(frame)
                     except ValueError:
                         pass
+                    if room_id:
+                        self._last_errors.pop(room_id, "")
                     return frame
+            if room_id:
+                error = self._last_errors.pop(room_id, "")
+                if error:
+                    raise RuntimeError(
+                        f"PerunChat gateway rejected the frame: {error}"
+                    )
             if loop.time() >= deadline:
                 raise TimeoutError("timed out waiting for Perun's execution response")
             await asyncio.sleep(0.05)
@@ -359,11 +395,13 @@ class PerunChatMCPServer:
             if frame.get("content_type") != self._EXECUTION_RESULT_CONTENT_TYPE:
                 return False
             payload = frame.get("payload") or {}
-            if payload.get("op") not in (None, op):
+            # Match ids exactly. Treating a missing id as a wildcard let a
+            # result for proposal A satisfy a waiter for proposal B.
+            if payload.get("op") != op:
                 return False
-            if payload.get("proposal_id") not in (None, proposal_id):
+            if str(payload.get("proposal_id") or "") != proposal_id:
                 return False
-            if transfer_id and payload.get("transfer_id") not in (None, transfer_id):
+            if transfer_id and str(payload.get("transfer_id") or "") != transfer_id:
                 return False
             return True
 
@@ -576,23 +614,20 @@ class PerunChatMCPServer:
     ) -> bytes:
         normalized = str(path).replace("\\", "/").strip()
         pure = PurePosixPath(normalized)
-        if not normalized or pure.is_absolute() or ".." in pure.parts:
+        parts = [part for part in pure.parts if part not in ("", ".")]
+        if not normalized or not parts or pure.is_absolute() or ".." in parts:
             raise ValueError("path must be a project-relative path")
-        if ":" in pure.parts[0]:
-            raise ValueError("path must be a project-relative path without a drive prefix")
-        lowered = normalized.lower()
-        sensitive_prefixes = (
-            ".git/",
-            ".perun/",
-            ".ssh/",
-            ".aws/",
-            ".gnupg/",
-        )
-        if lowered.startswith(sensitive_prefixes) or lowered in {
-            ".env",
-            "opencode.json",
-            "perun.md",
-        }:
+        # Check every segment, not just the first: `docs/a.md:stream` writes an
+        # NTFS alternate data stream, and `CON`/`NUL.txt` are reserved devices.
+        for part in parts:
+            if ":" in part or "\x00" in part or part.rstrip(". ") != part:
+                raise ValueError("path contains a forbidden character")
+        lowered_parts = [part.lower() for part in parts]
+        if any(part in {".git", ".perun", ".ssh", ".aws", ".gnupg"} for part in lowered_parts):
+            raise ValueError("path is sensitive and cannot be handed off")
+        if lowered_parts[-1] in {"opencode.json", "perun.md"} or lowered_parts[
+            -1
+        ].startswith(".env"):
             raise ValueError("path is sensitive and cannot be handed off")
         enc = str(encoding or "").strip().lower()
         if enc == "base64":
@@ -613,7 +648,13 @@ class PerunChatMCPServer:
             )
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr(normalized, raw)
+            # Pin the metadata: a ZipInfo stamped with the current time makes
+            # identical content produce different bytes, which breaks any
+            # byte-level comparison between two handoffs.
+            info = zipfile.ZipInfo("/".join(parts), date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o644 << 16
+            archive.writestr(info, raw)
         return buf.getvalue()
 
     def list_resources(self) -> List[Dict[str, str]]:
@@ -1014,18 +1055,28 @@ class PerunChatMCPServer:
                         total_chunks = 0
                     if not transfer_id or total_chunks <= 0:
                         return _err("package_ready did not include a valid transfer")
+                    # Integrity fields are mandatory. Treating a missing
+                    # ``sha256``/``total_size`` as "skip the check" would let a
+                    # buggy or hostile sender write arbitrary bytes.
+                    expected_digest = str(ready.get("sha256") or "").strip().lower()
+                    if not _SHA256_RE.fullmatch(expected_digest):
+                        return _err("package_ready is missing a valid sha256")
+                    try:
+                        expected_size = int(ready.get("total_size") or 0)
+                    except (TypeError, ValueError):
+                        expected_size = 0
+                    if expected_size <= 0:
+                        return _err("package_ready is missing a valid total_size")
                     try:
                         archive = await self._collect_package(transfer_id, total_chunks)
                     finally:
                         self._drop_package(transfer_id)
-                    expected_size = int(ready.get("total_size") or len(archive))
                     if len(archive) != expected_size:
                         return _err(
                             f"download size mismatch: expected {expected_size}, got {len(archive)}"
                         )
                     digest = hashlib.sha256(archive).hexdigest()
-                    expected_digest = str(ready.get("sha256") or "").lower()
-                    if expected_digest and digest != expected_digest:
+                    if digest != expected_digest:
                         return _err("download sha256 mismatch")
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     temp_path = destination.with_name(destination.name + ".part")

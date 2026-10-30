@@ -93,19 +93,27 @@ class PerunChatClient:
     async def connect(self) -> None:
         if self._closed:
             raise RuntimeError("Client has been closed")
+        # Tear down any previous socket first. A failed rejoin below would
+        # otherwise leak the new socket and its listener, and every retry would
+        # add another pair (duplicate delivery plus parallel reconnect loops).
+        await self._shutdown_connection()
         kwargs = self._connect_kwargs()
         self.ws = await websockets.connect(self.endpoint, **kwargs)
         self._listen_task = asyncio.create_task(self._listen_loop())
         # Restore any rooms that were joined before a reconnect.
-        for room_id in list(self._joined_rooms):
-            # Room type is encoded in the id prefix; default to GROUP if ambiguous.
-            if room_id.startswith("pub:"):
-                room_type = RoomType.PUBLIC
-            elif room_id.startswith("prv:"):
-                room_type = RoomType.PRIVATE
-            else:
-                room_type = RoomType.GROUP
-            await self.join_room(room_id, room_type)
+        try:
+            for room_id in list(self._joined_rooms):
+                # Room type is encoded in the id prefix; default to GROUP if ambiguous.
+                if room_id.startswith("pub:"):
+                    room_type = RoomType.PUBLIC
+                elif room_id.startswith("prv:"):
+                    room_type = RoomType.PRIVATE
+                else:
+                    room_type = RoomType.GROUP
+                await self.join_room(room_id, room_type)
+        except BaseException:
+            await self._shutdown_connection()
+            raise
 
     async def disconnect(self) -> None:
         self._closed = True
@@ -127,6 +135,7 @@ class PerunChatClient:
             self.ws = None
 
     async def _listen_loop(self) -> None:
+        cancelled = False
         try:
             if self.ws is None:
                 return
@@ -151,9 +160,10 @@ class PerunChatClient:
         except ConnectionClosed:
             pass
         except asyncio.CancelledError:
+            cancelled = True
             raise
         finally:
-            if not self._closed and self.reconnect:
+            if not cancelled and not self._closed and self.reconnect:
                 await self._attempt_reconnect()
 
     async def _attempt_reconnect(self) -> None:

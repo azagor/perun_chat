@@ -213,3 +213,45 @@ async def test_reconnect_rejoins_private_rooms() -> None:
     assert ("prv:alice:bob", RoomType.PRIVATE) in join_calls
 
     await client.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_connect_tears_down_a_previous_socket(client: PerunChatClient) -> None:
+    """A reconnect must not leave the old socket and listener alive."""
+    first = AsyncMock()
+    first.__aiter__.return_value = iter([])
+    second = AsyncMock()
+    second.__aiter__.return_value = iter([])
+    sockets = [first, second]
+
+    async def fake_connect(*args, **kwargs):
+        return sockets.pop(0)
+
+    with patch("websockets.connect", side_effect=fake_connect):
+        await client.connect()
+        await client.connect()
+
+    first.close.assert_awaited()
+    assert client.ws is second
+
+
+@pytest.mark.asyncio
+async def test_connect_closes_the_new_socket_when_rejoin_fails(
+    client: PerunChatClient,
+) -> None:
+    mock_ws = AsyncMock()
+    mock_ws.__aiter__.return_value = iter([])
+    client._joined_rooms.add("grp:perun:demo:chat")
+
+    async def fake_connect(*args, **kwargs):
+        return mock_ws
+
+    with patch("websockets.connect", side_effect=fake_connect), patch.object(
+        client, "join_room", AsyncMock(side_effect=RuntimeError("boom"))
+    ):
+        with pytest.raises(RuntimeError, match="boom"):
+            await client.connect()
+
+    mock_ws.close.assert_awaited()
+    assert client.ws is None
+    assert client._listen_task is None

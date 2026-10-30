@@ -63,49 +63,98 @@ def _shannon_entropy(data: str) -> float:
     return -sum(p * math.log2(p) for p in freq.values())
 
 
-class DLPScanner:
-    """Scans outbound text/JSON for high-entropy secrets and redacts matches."""
+# Identifiers that must never be treated as secrets: SCREAMING_SNAKE names,
+# path-like tokens, and anything ending in a file extension. A chat message
+# naming `docs/HARDENING_BACKLOG_PART3.md` is documentation, not a credential.
+_IDENTIFIER_RE = re.compile(r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$")
+_PATHISH_RE = re.compile(r"^(?:\.{0,2}/|\w+/)")
+_EXTENSION_RE = re.compile(
+    r"\.(?:md|txt|py|json|ya?ml|toml|ini|cfg|zip|sha256|log|ps1|sh|js|ts|html|css)$",
+    re.I,
+)
 
-    HIGH_ENTROPY_THRESHOLD = 4.2
-    HIGH_ENTROPY_MIN_LEN = 24
+
+def _looks_like_identifier(candidate: str) -> bool:
+    """True when a high-entropy run is almost certainly a name, not a secret."""
+    if _IDENTIFIER_RE.match(candidate):
+        return True
+    if _PATHISH_RE.match(candidate) or _EXTENSION_RE.search(candidate):
+        return True
+    has_digit = any(ch.isdigit() for ch in candidate)
+    has_upper = any(ch.isupper() for ch in candidate)
+    # Credentials mix letters and digits in one run. Lowercase names with
+    # separators (`hardening_backlog_part3`) are prose.
+    if not has_digit:
+        return True
+    return "_" in candidate and not has_upper
+
+
+class DLPScanner:
+    """Scans outbound text/JSON for secrets.
+
+    Labelled credential patterns (API keys, private keys, `NAME=value`
+    assignments) are redacted. The high-entropy heuristic is **detection only**
+    by default: rewriting fuzzy matches corrupts ordinary technical text —
+    filenames, identifiers, base64 patches — which is worse than the leak it
+    hopes to prevent, because the sender and the receiver silently disagree
+    about the content. Set ``PERUNCHAT_DLP_ENTROPY_REDACT=1`` to restore
+    rewriting for deployments that require it.
+    """
+
+    HIGH_ENTROPY_THRESHOLD = 4.5
+    HIGH_ENTROPY_MIN_LEN = 32
+
+    def __init__(self) -> None:
+        self.entropy_redaction = os.environ.get(
+            "PERUNCHAT_DLP_ENTROPY_REDACT", ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
 
     def scan(self, text: str) -> Tuple[str, List[str]]:
         """
-        Return (redacted_text, list_of_alert_labels).
-        Matches are replaced with `[REDACTED_SECRET]`.
+        Return (scanned_text, list_of_alert_labels).
+
+        Labelled matches are replaced with ``[REDACTED_SECRET]``. Entropy hits
+        are reported in ``alerts`` and left intact unless explicitly enabled.
         """
         if not isinstance(text, str):
             # If payload is JSON/proposal, scan its serialized form.
             text = str(text)
         alerts: List[str] = []
 
-        # Regex-based redaction first so labelled alerts are preserved even when
-        # the match also happens to be high-entropy.
-        redacted = text
+        # Rebuild rather than mutating while iterating: replacing inside a
+        # string that ``finditer`` is walking shifts every later match index.
+        scanned = text
         for label, pattern in _DLP_PATTERNS:
-            for match in pattern.finditer(redacted):
+            if pattern.search(scanned):
                 alerts.append(f"dlp_regex:{label}")
-                redacted = redacted[: match.start()] + "[REDACTED_SECRET]" + redacted[match.end() :]
+                scanned = pattern.sub("[REDACTED_SECRET]", scanned)
 
-        # Entropy-based redaction for remaining long high-entropy strings.
-        redacted, entropy_alerts = self._redact_high_entropy(redacted, [])
+        # Entropy-based detection for remaining long high-entropy strings.
+        scanned, entropy_alerts = self._scan_high_entropy(scanned, [])
         alerts.extend(entropy_alerts)
 
-        return redacted, alerts
+        return scanned, alerts
 
-    def _redact_high_entropy(self, text: str, alerts: List[str]) -> Tuple[str, List[str]]:
-        candidate_pattern = re.compile(r"[A-Za-z0-9+/=_-]{24,}")
+    def _scan_high_entropy(self, text: str, alerts: List[str]) -> Tuple[str, List[str]]:
+        candidate_pattern = re.compile(
+            r"[A-Za-z0-9+/=_-]{%d,}" % self.HIGH_ENTROPY_MIN_LEN
+        )
         result = text
         offset = 0
         for match in candidate_pattern.finditer(text):
             candidate = match.group()
-            if _shannon_entropy(candidate) >= self.HIGH_ENTROPY_THRESHOLD:
-                alerts.append("dlp_entropy:high_entropy_string")
-                start = match.start() + offset
-                end = match.end() + offset
-                replacement = "[REDACTED_SECRET]"
-                result = result[:start] + replacement + result[end:]
-                offset += len(replacement) - len(candidate)
+            if _looks_like_identifier(candidate):
+                continue
+            if _shannon_entropy(candidate) < self.HIGH_ENTROPY_THRESHOLD:
+                continue
+            alerts.append("dlp_entropy:high_entropy_string")
+            if not self.entropy_redaction:
+                continue
+            start = match.start() + offset
+            end = match.end() + offset
+            replacement = "[REDACTED_SECRET]"
+            result = result[:start] + replacement + result[end:]
+            offset += len(replacement) - len(candidate)
         return result, alerts
 
 
@@ -118,6 +167,10 @@ class TokenBucket:
 
     _tokens: float = field(default=10.0, init=False)
     _last_update: float = field(default_factory=time.time, init=False)
+
+    def __post_init__(self) -> None:
+        # Start full: the default field value cannot see ``capacity``.
+        self._tokens = float(self.capacity)
 
     def consume(self, now: Optional[float] = None) -> bool:
         if now is None:
@@ -583,23 +636,38 @@ class SecurityPipeline:
         )
 
     def scan_egress(self, frame: Dict[str, Any]) -> Dict[str, Any]:
-        """Return a copy of the frame with DLP redactions applied to payload text."""
+        """Return a copy of the frame with labelled credential redaction applied.
+
+        Only *labelled* secret patterns (API keys, private keys, ``NAME=value``
+        assignments) are rewritten. The fuzzy high-entropy heuristic runs in
+        detect-only mode, because rewriting it previously corrupted ordinary
+        technical text — filenames, identifiers, base64 patches — so the
+        proposal the executor received no longer matched the approved body.
+        """
         import copy
 
         safe = copy.deepcopy(frame)
         payload = safe.get("payload")
+        alerts: List[str] = []
+        changed = False
         if isinstance(payload, str):
-            redacted, alerts = self.dlp.scan(payload)
-            safe["payload"] = redacted
-            if alerts:
-                safe.setdefault("_security_alerts", []).extend(alerts)
+            scanned, alerts = self.dlp.scan(payload)
+            if scanned != payload:
+                safe["payload"] = scanned
+                changed = True
         elif isinstance(payload, dict):
             for key, value in payload.items():
                 if isinstance(value, str):
-                    redacted, alerts = self.dlp.scan(value)
-                    payload[key] = redacted
-                    if alerts:
-                        safe.setdefault("_security_alerts", []).extend(alerts)
+                    scanned, found = self.dlp.scan(value)
+                    alerts.extend(found)
+                    if scanned != value:
+                        payload[key] = scanned
+                        changed = True
+        if alerts:
+            existing = safe.get("_security_alerts") or []
+            safe["_security_alerts"] = list(dict.fromkeys([*existing, *alerts]))
+        if changed:
+            safe["_dlp_redacted"] = True
         return safe
 
     async def check_auth_allowed(self, identifier: str) -> bool:

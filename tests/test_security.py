@@ -13,6 +13,7 @@ from perunchat.security import (
     RateLimiter,
     SequenceValidator,
     SecurityPipeline,
+    TokenBucket,
     TurnCounter,
     generate_api_key,
 )
@@ -224,3 +225,61 @@ async def test_auth_limiter_prunes_expired_keys(monkeypatch):
     now += 10
     await limiter.attempt("new")
     assert "old" not in limiter._failures
+
+
+# --- DLP must never corrupt technical text ---------------------------------
+
+def test_dlp_preserves_backlog_filenames() -> None:
+    """Regression: the entropy heuristic rewrote `HARDENING_BACKLOG_PART3`."""
+    scanner = DLPScanner()
+    text = "Create docs/HARDENING_BACKLOG_PART3.md continuing PART2 (items 12-16)."
+    scanned, alerts = scanner.scan(text)
+    assert scanned == text
+    assert alerts == []
+
+
+def test_dlp_entropy_is_detect_only_by_default(monkeypatch) -> None:
+    monkeypatch.delenv("PERUNCHAT_DLP_ENTROPY_REDACT", raising=False)
+    scanner = DLPScanner()
+    candidate = "Qm9vcmRpbmdseVRlY2huaWNhbFNlY3JldDEyMzQ1Njc4OTA"
+    scanned, alerts = scanner.scan(f"value={candidate} end")
+    assert candidate in scanned
+    assert any("entropy" in a for a in alerts)
+
+
+def test_dlp_entropy_redaction_is_opt_in(monkeypatch) -> None:
+    monkeypatch.setenv("PERUNCHAT_DLP_ENTROPY_REDACT", "1")
+    scanner = DLPScanner()
+    candidate = "Qm9vcmRpbmdseVRlY2huaWNhbFNlY3JldDEyMzQ1Njc4OTA"
+    scanned, alerts = scanner.scan(candidate)
+    assert candidate not in scanned
+    assert "[REDACTED_SECRET]" in scanned
+    assert any("entropy" in a for a in alerts)
+
+
+def test_dlp_still_redacts_labelled_secrets() -> None:
+    scanner = DLPScanner()
+    scanned, alerts = scanner.scan("key: prn_live_" + "a1b2c3d4" * 6)
+    assert "prn_live_" not in scanned
+    assert any("perun_token" in a for a in alerts)
+
+
+def test_scan_egress_keeps_identifier_content_but_flags_secrets() -> None:
+    pipeline = SecurityPipeline()
+    frame = {
+        "payload": {
+            "op": "create",
+            "content": "docs/HARDENING_BACKLOG_PART3.md holds items 12-20.",
+            "note": "token is prn_live_" + "a1b2c3d4" * 6,
+        }
+    }
+    safe = pipeline.scan_egress(frame)
+    assert safe["payload"]["content"] == frame["payload"]["content"]
+    assert "prn_live_" not in safe["payload"]["note"]
+    assert safe["_dlp_redacted"] is True
+
+
+def test_token_bucket_starts_full_for_its_capacity() -> None:
+    bucket = TokenBucket(capacity=3, refill_per_second=0)
+    assert [bucket.consume(now=0) for _ in range(3)] == [True, True, True]
+    assert bucket.consume(now=0) is False

@@ -910,7 +910,11 @@ async def test_unsolicited_package_chunks_are_ignored(
     assert server._package_chunks["trf_unsolicited"][0] == b"junk"
 
 
-def _push_package_ready(server, transfer_id: str, total_chunks: int = 3) -> None:
+def _push_package_ready(
+    server, transfer_id: str, total_chunks: int = 3, payload: bytes | None = None
+) -> None:
+    """Announce a download, with the integrity fields the client now requires."""
+    body = payload if payload is not None else b"x" * total_chunks
     _push_control(
         server,
         "application/perun-execution",
@@ -918,6 +922,8 @@ def _push_package_ready(server, transfer_id: str, total_chunks: int = 3) -> None
             "op": "package_ready",
             "proposal_id": "prop_0123456789ab",
             "transfer_id": transfer_id,
+            "sha256": hashlib.sha256(body).hexdigest(),
+            "total_size": len(body),
             "total_chunks": total_chunks,
         },
     )
@@ -1256,7 +1262,11 @@ async def test_rotate_key_tool_persists_new_key(
     assert result["isError"] is False
     assert key_file.read_text().strip() == "prn_live_newsecret"
 
-def test_expired_ticket_is_rejected() -> None:
+def test_expired_ticket_is_rejected(monkeypatch) -> None:
+    # Importing the gateway requires the signing secret; tests must not depend on
+    # another test having loaded it first.
+    monkeypatch.setenv("PERUNCHAT_SECRET", "test-secret-do-not-use-in-production")
+    monkeypatch.setenv("PERUNCHAT_ENV", "test")
     from perunchat.gateway import TicketStore
     import time
 
@@ -1278,3 +1288,113 @@ async def test_rotate_key_refuses_unwritable_path(
     result = await server.call_tool("perunchat_rotate_key", {})
     assert result["isError"] is True
     client.rotate_key.assert_not_awaited()
+
+
+# --- handoff path and integrity hardening ---------------------------------
+
+@pytest.mark.parametrize(
+    "bad_path",
+    [
+        ".",
+        "./.git/config",
+        "a/./.git/x",
+        "sub/opencode.json",
+        "sub/perun.md",
+        ".env.local",
+        "docs/a.md:ads",
+        "trail.md.",
+        "a/NUL\x00.md",
+    ],
+)
+def test_single_file_archive_rejects_unsafe_paths(
+    server: PerunChatMCPServer, bad_path: str
+) -> None:
+    with pytest.raises(ValueError):
+        server._build_single_file_archive(bad_path, "x", "utf-8")
+
+
+@pytest.mark.parametrize("good_path", ["a/b.md", "CANARY7.md", "docs/x.json"])
+def test_single_file_archive_accepts_relative_paths(
+    server: PerunChatMCPServer, good_path: str
+) -> None:
+    archive = server._build_single_file_archive(good_path, "x", "utf-8")
+    with zipfile.ZipFile(io.BytesIO(archive)) as zf:
+        assert zf.namelist() == [good_path]
+
+
+def test_single_file_archive_is_deterministic(server: PerunChatMCPServer) -> None:
+    first = server._build_single_file_archive("a.md", "same", "utf-8")
+    second = server._build_single_file_archive("a.md", "same", "utf-8")
+    assert first == second
+
+
+def test_handoff_path_rejects_the_root_itself(server: PerunChatMCPServer) -> None:
+    with pytest.raises(ValueError, match="must name a file"):
+        server._resolve_handoff_path(".", "x.zip")
+
+
+def test_package_ready_without_integrity_is_rejected(
+    server: PerunChatMCPServer,
+) -> None:
+    _push_control(
+        server,
+        "application/perun-execution",
+        {
+            "op": "package_ready",
+            "proposal_id": "prop_0123456789ab",
+            "transfer_id": "trf_unsigned",
+            "total_chunks": 1,
+        },
+    )
+    assert "trf_unsigned" not in server._expected_downloads
+    assert "sha256" in server._package_errors["trf_unsigned"]
+
+
+def test_package_ready_with_short_digest_is_rejected(
+    server: PerunChatMCPServer,
+) -> None:
+    _push_control(
+        server,
+        "application/perun-execution",
+        {
+            "op": "package_ready",
+            "proposal_id": "prop_0123456789ab",
+            "transfer_id": "trf_short",
+            "sha256": "abc",
+            "total_size": 10,
+            "total_chunks": 1,
+        },
+    )
+    assert "trf_short" not in server._expected_downloads
+
+
+def test_download_slot_eviction_releases_buffered_bytes(
+    server: PerunChatMCPServer,
+) -> None:
+    for index in range(server._MAX_PACKAGE_TRANSFERS + 1):
+        _push_package_ready(server, f"trf_evict_{index}", total_chunks=1)
+        _push_download_chunk(server, f"trf_evict_{index}", 0)
+    assert server._package_total_bytes == sum(server._package_bytes.values())
+    assert "trf_evict_0" not in server._package_chunks
+    assert "trf_evict_0" not in server._package_bytes
+
+
+def test_owner_id_is_pinned_to_the_first_sender(server: PerunChatMCPServer) -> None:
+    room = "grp:perun:demo:chat"
+    server._on_frame(
+        {
+            "content_type": "application/perun-execution-result",
+            "room_id": room,
+            "sender": {"agent_id": "peruntheoverseer", "runtime": "perun"},
+            "payload": {"op": "execution_status", "proposal_id": "prop_0123456789ab"},
+        }
+    )
+    server._on_frame(
+        {
+            "content_type": "application/perun-execution-result",
+            "room_id": room,
+            "sender": {"agent_id": "intruder", "runtime": "perun"},
+            "payload": {"op": "execution_status", "proposal_id": "prop_0123456789ab"},
+        }
+    )
+    assert server._perun_agent_ids[room] == "peruntheoverseer"

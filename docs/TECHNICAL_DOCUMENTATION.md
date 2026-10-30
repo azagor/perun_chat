@@ -112,11 +112,14 @@ creation time:
 1. **Raw-frame cap.** Incoming WebSocket text is rejected with close code `1009`
    if it exceeds `MAX_FRAME_BYTES` (`_PACKAGE_MAX_PAYLOAD_BYTES + 16 KiB`).
 2. **JSON envelope validation.** Non-JSON, deeply nested JSON (`RecursionError`),
-   and JSON values that are not objects are rejected with `invalid_json` or
-   `invalid_envelope` without terminating the connection. `sequence_number`,
-   `timestamp`, `thread_id`, `room_type`, `room_id`, and `sender` are
-   type-checked before use; bad values return `invalid_envelope_fields`.
-3. Token-bucket rate limiter (10 msg/sec per agent), async-safe.
+   bare `NaN`/`Infinity` constants, and JSON values that are not objects are
+   rejected with `invalid_json` or `invalid_envelope` without terminating the
+   connection. `sequence_number`, `timestamp`, `thread_id`, `room_type`,
+   `room_id`, and `sender` are type-checked before use; a non-finite float
+   timestamp is rejected as `invalid_envelope_fields`.
+3. Token-bucket rate limiter (10 msg/sec per agent), async-safe, plus a
+   per-connection frame bucket (`frame_rate_limited`, 400 burst / 100 per s) that
+   bounds a single socket's raw frame rate.
 4. Monotonic sequence & nonce validation per `(agent_id, runtime)` (drop
    timestamp skew > 120s). The authenticated runtime is taken from the API
    key's ``supported_runtime`` when the client does not supply a non-default
@@ -132,7 +135,10 @@ creation time:
    **only** for frames that survive proposal staging/validation and are about to
    be broadcast, so rejected or staged proposals cannot drain the budget or
    trigger the burst lock.
-6. Ingress/egress DLP scanner (redact secrets).
+6. Ingress/egress DLP scanner: labelled credential patterns are redacted; the
+   high-entropy heuristic is detection-only (alerts in `_security_alerts`) so it
+   cannot corrupt filenames or proposal bodies. Opt in to rewriting with
+   `PERUNCHAT_DLP_ENTROPY_REDACT=1`.
 7. Authentication-failure rate limiter (5 failures / 60 s per source IP).
 
 ### 5.3 Room access control
@@ -156,7 +162,13 @@ creation time:
   while the socket is still replaying is queued and delivered **after** history,
   preserving total order. A per-socket `_SEND_TIMEOUT` prevents one stalled
   client from blocking delivery to the rest of the room; timed-out sockets are
-  dropped. Replayed frames keep the original message ``id`` and ``sender``
+  dropped. A replaying socket that accumulates more than `_MAX_PENDING` (200)
+  queued frames is disconnected so it can reconnect, and each connection is
+  capped at `_MAX_ROOMS_PER_CONN` rooms. Rooms that have been empty and idle for
+  10 minutes are reaped, so arbitrary `pub:` ids cannot grow memory without
+  bound. Replay sorts by a NaN-safe timestamp key, so one malformed stored frame
+  cannot abort every later joiner. Replayed frames keep the original message
+  ``id`` and ``sender``
   object (including ``runtime``), so clients can deduplicate by id without
   content heuristics. The buffer is best-effort and does not survive gateway
   restarts (Redis/NATS in Phase 2).

@@ -2214,3 +2214,84 @@ def test_rotate_key_endpoint_replaces_old_key() -> None:
         assert client.get(
             "/api/v1/me", headers={"Authorization": f"Bearer {new_key}"}
         ).status_code == 200
+
+
+# --- NaN timestamps must not poison a room --------------------------------
+
+def test_nan_timestamp_frame_is_rejected_as_invalid_json() -> None:
+    key = _seed_key(scopes=["pub:*"])
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/chat/ws", headers=_headers(key)) as ws:
+            _join_room(ws, "pub:nan:test")
+            raw = (
+                '{"type":"BROADCAST","room_id":"pub:nan:test","sequence_number":2,'
+                '"timestamp":NaN,"payload":"hi"}'
+            )
+            ws.send_text(raw)
+            reply = json.loads(ws.receive_text())
+            assert reply["type"] == "ERROR"
+            assert reply["message"] == "invalid_json"
+            # The loop survives and a valid frame still works.
+            ws.send_text(
+                json.dumps(
+                    {
+                        "type": "BROADCAST",
+                        "room_id": "pub:nan:test",
+                        "room_type": "PUBLIC",
+                        "content_type": "text/plain",
+                        "sequence_number": 3,
+                        "timestamp": int(time.time() * 1000),
+                        "payload": "still alive",
+                    }
+                )
+            )
+            echo = json.loads(ws.receive_text())
+            assert "still alive" in json.dumps(echo)
+
+
+def test_nan_timestamp_never_enters_history() -> None:
+    key = _seed_key(scopes=["pub:*"])
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/chat/ws", headers=_headers(key)) as ws:
+            _join_room(ws, "pub:nan:history")
+            ws.send_text(
+                '{"type":"BROADCAST","room_id":"pub:nan:history","sequence_number":2,'
+                '"timestamp":Infinity,"payload":"hi"}'
+            )
+            assert json.loads(ws.receive_text())["message"] == "invalid_json"
+    room = gateway._rooms.get("pub:nan:history")
+    assert room is not None
+    assert all(
+        not isinstance(frame.get("timestamp"), float)
+        for _, frame in room._history
+    )
+
+
+@pytest.mark.asyncio
+async def test_replay_survives_a_poisoned_history_entry() -> None:
+    from perunchat.gateway import Room
+
+    room = Room("pub:poison:replay", "PUBLIC")
+
+    class _WS:
+        def __init__(self) -> None:
+            self.sent: list = []
+
+        async def send_text(self, message: str) -> None:
+            self.sent.append(json.loads(message))
+
+    ws = _WS()
+    room.connections[ws] = "agent-x"
+    room._history.append((1, {"payload": "bad", "timestamp": float("nan")}))
+    room._history.append((2, {"payload": "good", "timestamp": 10}))
+    await room.replay_history(ws, "agent-x")
+    assert [frame["payload"] for frame in ws.sent] == ["bad", "good"]
+
+
+@pytest.mark.asyncio
+async def test_idle_room_is_reaped(monkeypatch) -> None:
+    room = await gateway.ensure_room("pub:idle:reap", "PUBLIC")
+    room.last_active = 0.0
+    await gateway.ensure_room("pub:fresh:room", "PUBLIC")
+    assert "pub:idle:reap" not in gateway._rooms
+    assert "pub:fresh:room" in gateway._rooms

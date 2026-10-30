@@ -13,6 +13,7 @@ import asyncio
 import copy
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -103,7 +104,7 @@ from .api import (
 from .keys import KeyStore
 from .models import ChatFrame
 from .rooms import RoomResolver, parse_room_id, private_room_id, room_managed_by
-from .security import SecurityPipeline
+from .security import SecurityPipeline, TokenBucket
 
 
 # Per-room message history cap and max payload size for backpressure.
@@ -126,8 +127,15 @@ _MAX_ROOMS_PER_CONN = 50
 _MAX_PENDING = 200
 # How often a live socket re-checks that its API key is still valid.
 _AUTH_RECHECK_SECONDS = 30.0
+# Per-connection frame budget: a token bucket so one authenticated member cannot
+# saturate the bridge with a burst of frames. Sized above legitimate bursts
+# (joining many rooms, replaying an outbox) and far below a flood.
+_FRAME_BURST = 400
+_FRAME_REFILL_PER_SECOND = 100.0
 # Per-socket send timeout so one stalled client cannot block the whole room.
 _SEND_TIMEOUT = 5.0
+# Reclaim an empty room after this long without traffic.
+_ROOM_IDLE_SECONDS = 600.0
 _PACKAGE_CONTENT_TYPE = "application/perun-package"
 _EXECUTION_CONTENT_TYPE = "application/perun-execution"
 _EXECUTION_RESULT_CONTENT_TYPE = "application/perun-execution-result"
@@ -145,6 +153,24 @@ def _allowed_origins_from_env() -> frozenset[str]:
         for item in raw.split(",")
         if item.strip()
     )
+
+
+def _reject_json_constant(name: str) -> Any:
+    """Reject bare ``NaN``/``Infinity``/``-Infinity`` at parse time.
+
+    ``json.loads`` accepts them by default and they poison downstream numeric
+    checks: ``abs(now - nan) > skew`` is False, so a NaN timestamp passes the
+    skew window and later crashes history replay on ``int(...)``.
+    """
+    raise ValueError(f"non-finite JSON constant: {name}")
+
+
+def _safe_ts(value: Any) -> int:
+    """Coerce a stored frame timestamp to an int without ever raising."""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 _ALLOWED_ORIGINS = _allowed_origins_from_env()
@@ -188,16 +214,19 @@ class Room:
         # receiving them out of order from the main broadcast loop.
         self._replaying: Set[WebSocket] = set()
         self._pending: Dict[WebSocket, list] = {}
+        self.last_active = time.time()
 
     async def join(self, ws: WebSocket, agent_id: str) -> None:
         self.connections[ws] = agent_id
         self._replaying.add(ws)
         self._pending[ws] = []
+        self.last_active = time.time()
 
     async def leave(self, ws: WebSocket) -> None:
         self.connections.pop(ws, None)
         self._replaying.discard(ws)
         self._pending.pop(ws, None)
+        self.last_active = time.time()
 
     def online_agent_ids(self) -> Set[str]:
         """Return the set of authenticated agent IDs currently connected."""
@@ -232,6 +261,7 @@ class Room:
         message = json.dumps(frame, ensure_ascii=False)
         self._seq += 1
         seq = self._seq
+        self.last_active = time.time()
         # Only store real chat frames for late-joiners; ephemeral control frames
         # such as PRESENCE_UPDATE should not be replayed. Directed execution
         # frames are never stored so another member cannot replay them later.
@@ -286,7 +316,9 @@ class Room:
             # order to match the chat log.
             snap = sorted(
                 list(self._history),
-                key=lambda item: int((item[1] or {}).get("timestamp") or 0),
+                # A malformed stored timestamp must not abort the replay for
+                # every later joiner; sort it as epoch 0 instead.
+                key=lambda item: _safe_ts((item[1] or {}).get("timestamp")),
             )
             verdict: dict[str, bool] = {}
             for seq, frame in snap:
@@ -347,8 +379,26 @@ class ChatGateway:
     async def ensure_room(self, room_id: str, room_type: str) -> Room:
         async with self.lock:
             if room_id not in self._rooms:
+                self._reap_idle_rooms_locked()
                 self._rooms[room_id] = Room(room_id, room_type)
             return self._rooms[room_id]
+
+    def _reap_idle_rooms_locked(self) -> None:
+        """Drop in-memory rooms that have been empty and idle for a while.
+
+        Without this, every distinct joinable room id that ever saw a joiner
+        stays resident for the life of the process.
+        """
+        cutoff = time.time() - _ROOM_IDLE_SECONDS
+        stale = [
+            room_id
+            for room_id, room in self._rooms.items()
+            if not room.connections and room.last_active < cutoff
+        ]
+        for room_id in stale:
+            self._rooms.pop(room_id, None)
+        if stale:
+            logger.info("Reaped %d idle room(s)", len(stale))
 
     async def drop_room(self, room_id: str) -> None:
         async with self.lock:
@@ -667,6 +717,12 @@ async def handle_ws(
     active_rooms: Dict[str, Room] = {}
     frame_limit = _PRE_PARSE_FRAME_MAX
     bad_frames = 0
+    # One bucket per connection: bounds a burst from a single authenticated
+    # member so it cannot saturate the bridge or the fan-out.
+    frame_budget = TokenBucket(
+        capacity=float(_FRAME_BURST),
+        refill_per_second=_FRAME_REFILL_PER_SECOND,
+    )
 
     watchdog: "asyncio.Task[None] | None" = None
     auth_key_id = key_record.id if key_record else ""
@@ -701,6 +757,12 @@ async def handle_ws(
 
         while True:
             raw = await ws.receive_text()
+            if not frame_budget.consume():
+                logger.warning(
+                    "Closing %s: frame rate exceeded", agent_id or f"anon:{remote_addr}"
+                )
+                await ws.close(code=1008, reason="frame_rate_limited")
+                break
             too_large = len(raw) > frame_limit
             if not too_large and len(raw) > frame_limit // 4:
                 too_large = len(raw.encode("utf-8")) > frame_limit
@@ -709,8 +771,8 @@ async def handle_ws(
                 break
 
             try:
-                envelope = json.loads(raw)
-            except (json.JSONDecodeError, RecursionError):
+                envelope = json.loads(raw, parse_constant=_reject_json_constant)
+            except (json.JSONDecodeError, RecursionError, ValueError):
                 bad_frames += 1
                 if bad_frames >= _MAX_BAD_FRAMES:
                     await ws.close(code=1008, reason="too_many_invalid_frames")
@@ -753,6 +815,7 @@ async def handle_ws(
                 or seq < 0
                 or not isinstance(ts, (int, float))
                 or isinstance(ts, bool)
+                or (isinstance(ts, float) and not math.isfinite(ts))
                 or not isinstance(thread_id, str)
                 or isinstance(room_type, bool)
                 or not isinstance(room_type, str)
