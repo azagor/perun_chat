@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 import os
 os.environ.setdefault("PERUNCHAT_ENV", "test")
@@ -1096,15 +1097,15 @@ def test_package_frame_in_non_managed_room_is_rejected() -> None:
 
 
 def test_deeply_nested_json_is_rejected_as_invalid_json() -> None:
-    """A RecursionError from json.loads must not kill the connection."""
+    """A huge nested frame is closed by the pre-parse budget."""
     key = _seed_key()
     with TestClient(app) as client:
         with client.websocket_connect("/v1/chat/ws", headers=_headers(key)) as ws:
-            # 20 000 levels is enough to overflow the C JSON decoder stack.
+            # 40 000 characters exceeds _PRE_PARSE_FRAME_MAX (32 KiB).
             ws.send_text("[" * 20000 + "]" * 20000)
-            reply = json.loads(ws.receive_text())
-            assert reply == {"type": "ERROR", "message": "invalid_json"}
-            _join_room(ws)
+            with pytest.raises(WebSocketDisconnect) as exc:
+                ws.receive_text()
+            assert exc.value.code == 1009
 
 
 def test_proposal_payload_must_be_dict() -> None:

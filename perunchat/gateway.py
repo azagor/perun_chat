@@ -13,6 +13,7 @@ import asyncio
 import copy
 import json
 import logging
+import os
 import time
 from collections import deque
 from contextlib import asynccontextmanager
@@ -49,6 +50,16 @@ _PACKAGE_MAX_PAYLOAD_BYTES = 524_288  # 512 KiB
 # Measured in characters: receive_text() returns str. This is a cheap
 # pre-parse guard; the WebSocket server also enforces its own byte limit.
 MAX_FRAME_BYTES = _PACKAGE_MAX_PAYLOAD_BYTES + 16_384
+# Cheap pre-parse budget for every connection. It is raised to MAX_FRAME_BYTES
+# only while the socket is in a managed grp: room (package handoff).
+_PRE_PARSE_FRAME_MAX = 32_768
+# Close a connection after this many malformed JSON/envelope frames.
+_MAX_BAD_FRAMES = 3
+# Per-connection room cap and per-replaying-socket pending frame cap.
+_MAX_ROOMS_PER_CONN = 50
+_MAX_PENDING = 200
+# How often a live socket re-checks that its API key is still valid.
+_AUTH_RECHECK_SECONDS = 30.0
 # Per-socket send timeout so one stalled client cannot block the whole room.
 _SEND_TIMEOUT = 5.0
 _PACKAGE_CONTENT_TYPE = "application/perun-package"
@@ -59,6 +70,25 @@ _EXECUTION_CONTENT_TYPES = {
     _EXECUTION_RESULT_CONTENT_TYPE,
     _PACKAGE_CONTENT_TYPE,
 }
+
+
+def _allowed_origins_from_env() -> frozenset[str]:
+    raw = os.environ.get("PERUNCHAT_ALLOWED_ORIGINS", "")
+    return frozenset(
+        item.strip().lower().rstrip("/")
+        for item in raw.split(",")
+        if item.strip()
+    )
+
+
+_ALLOWED_ORIGINS = _allowed_origins_from_env()
+
+
+def _origin_ok(origin: str | None) -> bool:
+    """True when the origin is allowed (or the allowlist is disabled)."""
+    if not _ALLOWED_ORIGINS or not origin:
+        return True
+    return origin.strip().lower().rstrip("/") in _ALLOWED_ORIGINS
 
 
 def _is_managed_project_room(room_id: str) -> bool:
@@ -149,6 +179,7 @@ class Room:
         if stored:
             self._history.append((seq, copy.deepcopy(frame)))
         targets: list[WebSocket] = []
+        overflow: list[WebSocket] = []
         for conn, recipient_agent_id in list(self.connections.items()):
             if directed and recipient_agent_id != recipient_id:
                 continue
@@ -156,9 +187,11 @@ class Room:
                 continue
             if conn in self._replaying:
                 # Buffer for sockets still receiving history so ordering is preserved.
-                self._pending.setdefault(conn, []).append(
-                    (seq, message, stored, sender_agent_id)
-                )
+                pending = self._pending.setdefault(conn, [])
+                if len(pending) >= _MAX_PENDING:
+                    overflow.append(conn)
+                    continue
+                pending.append((seq, message, stored, sender_agent_id))
             else:
                 targets.append(conn)
         results = await asyncio.gather(*(self._send(c, message) for c in targets))
@@ -169,6 +202,13 @@ class Room:
                     await conn.close()
                 except Exception:
                     pass
+        for conn in overflow:
+            logger.warning("Dropping slow replayer after %d pending frames", _MAX_PENDING)
+            await self.leave(conn)
+            try:
+                await conn.close()
+            except Exception:
+                pass
 
     async def replay_history(self, ws: WebSocket, agent_id: str) -> None:
         """Send the buffered recent history to a newly joined connection."""
@@ -182,11 +222,14 @@ class Room:
                 list(self._history),
                 key=lambda item: int((item[1] or {}).get("timestamp") or 0),
             )
+            verdict: dict[str, bool] = {}
             for seq, frame in snap:
                 if ws not in self.connections:
                     return
                 sender_id = (frame.get("sender") or {}).get("agent_id")
-                if self._blocked(agent_id, sender_id):
+                if sender_id and sender_id not in verdict:
+                    verdict[sender_id] = self._blocked(agent_id, sender_id)
+                if sender_id and verdict[sender_id]:
                     continue
                 if not await self._send(ws, json.dumps(frame, ensure_ascii=False)):
                     await self.leave(ws)
@@ -203,7 +246,9 @@ class Room:
                     self._replaying.discard(ws)
                     return
                 for seq, message, stored, sender_id in batch:
-                    if self._blocked(agent_id, sender_id):
+                    if sender_id and sender_id not in verdict:
+                        verdict[sender_id] = self._blocked(agent_id, sender_id)
+                    if sender_id and verdict[sender_id]:
                         continue
                     if not await self._send(ws, message):
                         await self.leave(ws)
@@ -420,6 +465,11 @@ async def handle_ws(
     x_agent_stream: str = Header(default="", alias="X-Agent-Stream"),
 ):
     remote_addr = ws.client.host if ws.client else "unknown"
+    origin = ws.headers.get("origin")
+    if not _origin_ok(origin):
+        logger.warning("ws_origin_rejected origin=%r addr=%s", origin, remote_addr)
+        await ws.close(code=1008, reason="origin_not_allowed")
+        return
     x_agent_stream = x_agent_stream.strip()
     if len(x_agent_stream) > 64:
         await ws.close(code=1008, reason="invalid_stream_id")
@@ -461,6 +511,28 @@ async def handle_ws(
 
     await ws.accept()
     active_rooms: Dict[str, Room] = {}
+    frame_limit = _PRE_PARSE_FRAME_MAX
+    bad_frames = 0
+
+    watchdog: "asyncio.Task[None] | None" = None
+    if token:
+        async def _revocation_watchdog() -> None:
+            while True:
+                await asyncio.sleep(_AUTH_RECHECK_SECONDS)
+                try:
+                    current = await asyncio.to_thread(
+                        gateway.keystore.authenticate, token
+                    )
+                except Exception:
+                    current = None
+                if current is None:
+                    try:
+                        await ws.close(code=1008, reason="key_revoked")
+                    except Exception:
+                        pass
+                    return
+
+        watchdog = asyncio.create_task(_revocation_watchdog())
 
     if agent_id:
         became_online = gateway.mark_online(agent_id, ws)
@@ -473,19 +545,30 @@ async def handle_ws(
     try:
         while True:
             raw = await ws.receive_text()
-            if len(raw) > MAX_FRAME_BYTES:
+            too_large = len(raw) > frame_limit
+            if not too_large and len(raw) > frame_limit // 4:
+                too_large = len(raw.encode("utf-8")) > frame_limit
+            if too_large:
                 await ws.close(code=1009, reason="frame_too_large")
                 break
 
             try:
                 envelope = json.loads(raw)
             except (json.JSONDecodeError, RecursionError):
+                bad_frames += 1
+                if bad_frames >= _MAX_BAD_FRAMES:
+                    await ws.close(code=1008, reason="too_many_invalid_frames")
+                    break
                 await ws.send_text(
                     json.dumps({"type": "ERROR", "message": "invalid_json"})
                 )
                 continue
 
             if not isinstance(envelope, dict):
+                bad_frames += 1
+                if bad_frames >= _MAX_BAD_FRAMES:
+                    await ws.close(code=1008, reason="too_many_invalid_frames")
+                    break
                 await ws.send_text(
                     json.dumps({"type": "ERROR", "message": "invalid_envelope"})
                 )
@@ -571,9 +654,26 @@ async def handle_ws(
                     )
                     continue
 
+                if room_id not in active_rooms and len(active_rooms) >= _MAX_ROOMS_PER_CONN:
+                    await ws.send_text(
+                        json.dumps(
+                            {
+                                "type": "ERROR",
+                                "message": "too_many_rooms",
+                                "room_id": room_id,
+                            }
+                        )
+                    )
+                    continue
+
                 room = await gateway.ensure_room(room_id, room_type)
                 await room.join(ws, agent_id or f"anon:{remote_addr}")
                 active_rooms[room_id] = room
+                frame_limit = (
+                    MAX_FRAME_BYTES
+                    if any(r.startswith("grp:") for r in active_rooms)
+                    else _PRE_PARSE_FRAME_MAX
+                )
                 try:
                     if agent_id and scope == "pub":
                         # Persist public joins so GET /api/v1/rooms can offer a
@@ -599,10 +699,15 @@ async def handle_ws(
                 room = active_rooms.pop(room_id, None)
                 if room:
                     await room.leave(ws)
+                frame_limit = (
+                    MAX_FRAME_BYTES
+                    if any(r.startswith("grp:") for r in active_rooms)
+                    else _PRE_PARSE_FRAME_MAX
+                )
                 # Public room memberships are not durable: leaving means leaving.
                 # Remove the persisted catalog entry and the in-memory ACL so the
                 # agent no longer appears as a member of the channel.
-                if agent_id and room_id.startswith("pub:"):
+                if room is not None and agent_id and room_id.startswith("pub:"):
                     try:
                         from .api import _remove_room_member
                         _remove_room_member(room_id, agent_id)
@@ -809,9 +914,13 @@ async def handle_ws(
                 )
                 continue
 
-            # Validate frame shape after server-side sender injection.
+            # Validate frame shape after server-side sender injection, then
+            # rebuild it from the model so unknown client keys cannot reach the
+            # history buffer or other consumers.
             try:
-                ChatFrame.model_validate(frame)
+                frame = ChatFrame.model_validate(frame).model_dump(
+                    mode="json", exclude_none=True
+                )
             except Exception as exc:
                 await ws.send_text(
                     json.dumps({"type": "ERROR", "message": "invalid_frame", "detail": str(exc)})
@@ -986,7 +1095,10 @@ async def handle_ws(
                 and ws in target_room._replaying
                 and ws in target_room._pending
             ):
-                target_room._pending.setdefault(ws, []).append(
+                pending = target_room._pending.setdefault(ws, [])
+                if len(pending) >= _MAX_PENDING:
+                    continue
+                pending.append(
                     (
                         target_room._seq,
                         json.dumps(safe_frame, ensure_ascii=False),
@@ -1001,7 +1113,13 @@ async def handle_ws(
     except WebSocketDisconnect:
         pass
     finally:
-        for room_id, room in active_rooms.items():
+        if watchdog is not None:
+            watchdog.cancel()
+            try:
+                await watchdog
+            except asyncio.CancelledError:
+                pass
+        for room_id, room in list(active_rooms.items()):
             await room.leave(ws)
             # Clean up public room memberships on disconnect, just as on explicit
             # ROOM_LEAVE, so a dropped connection does not leave the agent in the

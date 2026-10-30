@@ -95,7 +95,7 @@ async def test_claim_execution_waits_for_result(server: PerunChatMCPServer) -> N
     _install_client(server, send)
     result = await server.call_tool(
         "perunchat_claim_execution",
-        {"room_id": "grp:perun:demo:chat", "proposal_id": "prop_test"},
+        {"room_id": "grp:perun:demo:chat", "proposal_id": "prop_0123456789ab"},
     )
     assert result["isError"] is False
     assert '"status": "claimed"' in result["content"][0]["text"]
@@ -120,7 +120,7 @@ async def test_download_package_writes_verified_zip(
             "application/perun-execution",
             {
                 "op": "package_ready",
-                "proposal_id": "prop_test",
+                "proposal_id": "prop_0123456789ab",
                 "transfer_id": transfer_id,
                 "sha256": digest,
                 "total_size": len(archive),
@@ -135,7 +135,7 @@ async def test_download_package_writes_verified_zip(
         "perunchat_request_download_package",
         {
             "room_id": "grp:perun:demo:chat",
-            "proposal_id": "prop_test",
+            "proposal_id": "prop_0123456789ab",
             "destination": str(destination),
         },
     )
@@ -181,7 +181,7 @@ async def test_upload_package_sends_begin_chunks_end(
                 "application/perun-execution-result",
                 {
                     "op": "package_accepted",
-                    "proposal_id": "prop_test",
+                    "proposal_id": "prop_0123456789ab",
                     "transfer_id": payload["transfer_id"],
                     "ok": True,
                 },
@@ -194,7 +194,7 @@ async def test_upload_package_sends_begin_chunks_end(
         "perunchat_upload_package",
         {
             "room_id": "grp:perun:demo:chat",
-            "proposal_id": "prop_test",
+            "proposal_id": "prop_0123456789ab",
             "zip_path": str(package_path),
             "chunk_bytes": 16384,
         },
@@ -234,7 +234,7 @@ async def test_upload_success_without_ok_is_not_error(
         elif payload.get("op") == "package_end":
             _push_control(server, "application/perun-execution-result", {
                 "op": "package_accepted",
-                "proposal_id": "prop_test",
+                "proposal_id": "prop_0123456789ab",
                 "transfer_id": payload["transfer_id"],
             })
         return {}
@@ -244,7 +244,7 @@ async def test_upload_success_without_ok_is_not_error(
         "perunchat_upload_package",
         {
             "room_id": "grp:perun:demo:chat",
-            "proposal_id": "prop_test",
+            "proposal_id": "prop_0123456789ab",
             "zip_path": str(package_path),
             "chunk_bytes": 16384,
         },
@@ -284,7 +284,7 @@ async def test_upload_failure_frame_is_surfaced(
         "perunchat_upload_package",
         {
             "room_id": "grp:perun:demo:chat",
-            "proposal_id": "prop_test",
+            "proposal_id": "prop_0123456789ab",
             "zip_path": str(package_path),
             "chunk_bytes": 16384,
         },
@@ -328,7 +328,7 @@ async def test_upload_ignores_rejection_for_another_transfer(
         "perunchat_upload_package",
         {
             "room_id": "grp:perun:demo:chat",
-            "proposal_id": "prop_test",
+            "proposal_id": "prop_0123456789ab",
             "zip_path": str(package_path),
             "chunk_bytes": 16384,
         },
@@ -358,7 +358,7 @@ async def test_upload_accepts_lenient_rejection_without_transfer_id(
         elif payload.get("op") == "package_end":
             _push_control(server, "application/perun-execution-result", {
                 "op": "package_rejected",
-                "proposal_id": "prop_test",
+                "proposal_id": "prop_0123456789ab",
                 "error": "lenient rejection",
             })
         return {}
@@ -368,7 +368,7 @@ async def test_upload_accepts_lenient_rejection_without_transfer_id(
         "perunchat_upload_package",
         {
             "room_id": "grp:perun:demo:chat",
-            "proposal_id": "prop_test",
+            "proposal_id": "prop_0123456789ab",
             "zip_path": str(package_path),
             "chunk_bytes": 16384,
         },
@@ -407,7 +407,7 @@ async def test_unrelated_rejection_is_ignored(
         "perunchat_upload_package",
         {
             "room_id": "grp:perun:demo:chat",
-            "proposal_id": "prop_test",
+            "proposal_id": "prop_0123456789ab",
             "zip_path": str(package_path),
             "chunk_bytes": 16384,
         },
@@ -427,12 +427,12 @@ async def test_unrelated_rejection_is_ignored(
         ),
         (
             "perunchat_write_target_file",
-            {"proposal_id": "p", "path": {"a": 1}, "content": "x"},
+            {"proposal_id": "prop_555555555555", "path": {"a": 1}, "content": "x"},
             "path must be a string",
         ),
         (
             "perunchat_upload_package",
-            {"proposal_id": "p", "zip_path": 5},
+            {"proposal_id": "prop_555555555555", "zip_path": 5},
             "zip_path must be a string",
         ),
         (
@@ -455,6 +455,40 @@ async def test_non_string_handoff_arguments_are_rejected(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad", ["prop_ABCDEF123456", "prop_abc", "prop_0123456789zz", ""]
+)
+async def test_invalid_proposal_id_is_rejected(
+    server: PerunChatMCPServer, bad: str
+) -> None:
+    server._upload_archive = AsyncMock()
+    _install_client(server, AsyncMock(return_value={}))
+    result = await server.call_tool(
+        "perunchat_execution_status",
+        {"room_id": "grp:perun:demo:chat", "proposal_id": bad},
+    )
+    assert result["isError"] is True
+    assert "proposal_id" in result["content"][0]["text"]
+    assert server._proposal_locks == {}
+
+
+@pytest.mark.asyncio
+async def test_transfer_status_does_not_require_a_proposal_id(
+    server: PerunChatMCPServer,
+) -> None:
+    server._send_execution = AsyncMock(return_value={})
+    server._wait_for_result = AsyncMock(
+        return_value={"op": "transfer_status", "ok": True, "transfer_id": "trf"}
+    )
+    _install_client(server, AsyncMock(return_value={}))
+    result = await server.call_tool(
+        "perunchat_transfer_status",
+        {"room_id": "grp:perun:demo:chat", "transfer_id": "trf"},
+    )
+    assert result["isError"] is False
+
+
+@pytest.mark.asyncio
 async def test_proposal_lock_is_released_on_cancellation(
     server: PerunChatMCPServer,
 ) -> None:
@@ -468,7 +502,7 @@ async def test_proposal_lock_is_released_on_cancellation(
     _install_client(server, AsyncMock(return_value={}))
     args = {
         "room_id": "grp:perun:demo:chat",
-        "proposal_id": "prop_cancel",
+        "proposal_id": "prop_cccccccccccc",
         "path": "README.md",
         "content": "x",
     }
@@ -516,7 +550,7 @@ async def test_same_proposal_handoffs_are_serialized(
             },
         )
 
-    results = await asyncio.gather(write("prop_a"), write("prop_a"))
+    results = await asyncio.gather(write("prop_aaaaaaaaaaaa"), write("prop_aaaaaaaaaaaa"))
     assert all(r["isError"] is False for r in results)
     assert peak == 1
 
@@ -550,7 +584,7 @@ async def test_different_proposals_run_concurrently(
             },
         )
 
-    results = await asyncio.gather(write("prop_a"), write("prop_b"))
+    results = await asyncio.gather(write("prop_aaaaaaaaaaaa"), write("prop_bbbbbbbbbbbb"))
     assert all(r["isError"] is False for r in results)
     assert peak == 2
 
@@ -578,11 +612,11 @@ async def test_claim_and_revoke_are_serialized(server: PerunChatMCPServer) -> No
     results = await asyncio.gather(
         server.call_tool(
             "perunchat_claim_execution",
-            {"room_id": "grp:perun:demo:chat", "proposal_id": "prop_a"},
+            {"room_id": "grp:perun:demo:chat", "proposal_id": "prop_aaaaaaaaaaaa"},
         ),
         server.call_tool(
             "perunchat_revoke_execution_claim",
-            {"room_id": "grp:perun:demo:chat", "proposal_id": "prop_a"},
+            {"room_id": "grp:perun:demo:chat", "proposal_id": "prop_aaaaaaaaaaaa"},
         ),
     )
     assert all(r["isError"] is False for r in results)
@@ -656,7 +690,7 @@ async def test_write_target_file_builds_single_file_zip(
         "perunchat_write_target_file",
         {
             "room_id": "grp:perun:demo:chat",
-            "proposal_id": "prop_test",
+            "proposal_id": "prop_0123456789ab",
             "path": "CANARY7.md",
             "content": "line1\nline2\nline3\n",
         },
@@ -675,7 +709,7 @@ async def test_write_target_file_rejects_absolute_path(
         "perunchat_write_target_file",
         {
             "room_id": "grp:perun:demo:chat",
-            "proposal_id": "prop_test",
+            "proposal_id": "prop_0123456789ab",
             "path": "/etc/passwd",
             "content": "nope",
         },
@@ -694,7 +728,7 @@ async def test_write_target_file_rejects_non_string_content(
         "perunchat_write_target_file",
         {
             "room_id": "grp:perun:demo:chat",
-            "proposal_id": "prop_test",
+            "proposal_id": "prop_0123456789ab",
             "path": "README.md",
             "content": {"a": 1},
         },
@@ -714,7 +748,7 @@ async def test_write_target_file_rejects_lone_surrogate(
         "perunchat_write_target_file",
         {
             "room_id": "grp:perun:demo:chat",
-            "proposal_id": "prop_test",
+            "proposal_id": "prop_0123456789ab",
             "path": "README.md",
             "content": "\ud800",
         },
@@ -743,7 +777,7 @@ async def test_write_target_file_normalizes_encoding(
         "perunchat_write_target_file",
         {
             "room_id": "grp:perun:demo:chat",
-            "proposal_id": "prop_test",
+            "proposal_id": "prop_0123456789ab",
             "path": "README.md",
             "content": body,
             "encoding": encoding,
@@ -770,7 +804,7 @@ async def test_chunk_bytes_error_is_clean(server: PerunChatMCPServer) -> None:
         "perunchat_write_target_file",
         {
             "room_id": "grp:perun:demo:chat",
-            "proposal_id": "prop_test",
+            "proposal_id": "prop_0123456789ab",
             "path": "README.md",
             "content": "hello",
             "chunk_bytes": "abc",
@@ -816,7 +850,7 @@ async def test_unknown_risk_tier_is_rejected(
 ) -> None:
     client = _install_client(server, AsyncMock(return_value={}))
     client.submit_proposal = AsyncMock(
-        return_value={"payload": {"proposal_id": "prop_test"}}
+        return_value={"payload": {"proposal_id": "prop_0123456789ab"}}
     )
     result = await server.call_tool(
         "perunchat_propose_action",
@@ -864,7 +898,7 @@ async def test_unsolicited_package_chunks_are_ignored(
             "content_type": "application/perun-execution",
             "payload": {
                 "op": "package_ready",
-                "proposal_id": "prop_test",
+                "proposal_id": "prop_0123456789ab",
                 "transfer_id": "trf_unsolicited",
                 "sha256": hashlib.sha256(b"junk").hexdigest(),
                 "total_size": 4,
@@ -882,7 +916,7 @@ def _push_package_ready(server, transfer_id: str, total_chunks: int = 3) -> None
         "application/perun-execution",
         {
             "op": "package_ready",
-            "proposal_id": "prop_test",
+            "proposal_id": "prop_0123456789ab",
             "transfer_id": transfer_id,
             "total_chunks": total_chunks,
         },
@@ -969,7 +1003,7 @@ async def test_handoff_paths_are_confined_to_handoff_dir(
         "perunchat_upload_package",
         {
             "room_id": "grp:perun:demo:chat",
-            "proposal_id": "prop_test",
+            "proposal_id": "prop_0123456789ab",
             "zip_path": str(outside),
         },
     )
@@ -980,7 +1014,7 @@ async def test_handoff_paths_are_confined_to_handoff_dir(
         "perunchat_request_download_package",
         {
             "room_id": "grp:perun:demo:chat",
-            "proposal_id": "prop_test",
+            "proposal_id": "prop_0123456789ab",
             "destination": str(outside.with_name("download.zip")),
         },
     )
@@ -1004,7 +1038,7 @@ async def test_download_sha_mismatch_removes_partial(
             "application/perun-execution",
             {
                 "op": "package_ready",
-                "proposal_id": "prop_test",
+                "proposal_id": "prop_0123456789ab",
                 "transfer_id": transfer_id,
                 "sha256": "0" * 64,
                 "total_size": len(archive),
@@ -1019,7 +1053,7 @@ async def test_download_sha_mismatch_removes_partial(
         "perunchat_request_download_package",
         {
             "room_id": "grp:perun:demo:chat",
-            "proposal_id": "prop_test",
+            "proposal_id": "prop_0123456789ab",
             "destination": str(destination),
         },
     )
@@ -1040,7 +1074,7 @@ async def test_gateway_error_is_surfaced(server: PerunChatMCPServer) -> None:
     _install_client(server, send)
     result = await server.call_tool(
         "perunchat_claim_execution",
-        {"room_id": "grp:perun:demo:chat", "proposal_id": "prop_test"},
+        {"room_id": "grp:perun:demo:chat", "proposal_id": "prop_0123456789ab"},
     )
     assert result["isError"] is True
     assert "non_monotonic_sequence" in result["content"][0]["text"]
@@ -1129,7 +1163,7 @@ async def test_revoke_claim_returns_payload(server: PerunChatMCPServer) -> None:
     _install_client(server, send)
     result = await server.call_tool(
         "perunchat_revoke_execution_claim",
-        {"room_id": "grp:perun:demo:chat", "proposal_id": "prop_test"},
+        {"room_id": "grp:perun:demo:chat", "proposal_id": "prop_0123456789ab"},
     )
     assert result["isError"] is False
     assert '"status": "approved"' in result["content"][0]["text"]
@@ -1153,7 +1187,7 @@ async def test_execution_status_returns_payload(server: PerunChatMCPServer) -> N
     _install_client(server, send)
     result = await server.call_tool(
         "perunchat_execution_status",
-        {"room_id": "grp:perun:demo:chat", "proposal_id": "prop_test"},
+        {"room_id": "grp:perun:demo:chat", "proposal_id": "prop_0123456789ab"},
     )
     assert result["isError"] is False
     assert '"status": "approved"' in result["content"][0]["text"]

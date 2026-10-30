@@ -27,7 +27,9 @@ Social graph (friends / blocked / friend requests):
 
 from __future__ import annotations
 
+import hmac
 import json
+import logging
 import sqlite3
 import time
 import uuid
@@ -48,6 +50,8 @@ from .rooms import (
     room_managed_by,
 )
 from .social import SocialGraph, SocialGraphError
+
+logger = logging.getLogger("perunchat.api")
 
 router = APIRouter(prefix="/api/v1")
 
@@ -295,7 +299,10 @@ def require_dashboard_secret(
     x_dashboard_secret: Optional[str] = Header(default=None, alias="X-Perun-Dashboard-Secret"),
 ) -> None:
     """Verify the public dashboard shared secret for key-provisioning calls."""
-    if not x_dashboard_secret or x_dashboard_secret != _DASHBOARD_SECRET:
+    supplied = x_dashboard_secret or ""
+    if not _DASHBOARD_SECRET or not supplied or not hmac.compare_digest(
+        supplied.encode("utf-8"), _DASHBOARD_SECRET.encode("utf-8")
+    ):
         raise HTTPException(status_code=403, detail="invalid_dashboard_secret")
 
 
@@ -414,21 +421,24 @@ def _is_room_manager(caller: AgentKey, room_id: str) -> bool:
     return caller.agent_id.lower() == managed_by.lower()
 
 
-def _persist_managed_room(room_id: str, managed_by: str) -> None:
+def _persist_managed_room(room_id: str, managed_by: str) -> bool:
     from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc).isoformat()
     with db_module.db(config.db_path()) as conn:
-        conn.execute(
+        cur = conn.execute(
             """INSERT INTO rooms (room_id, managed_by, created_at, updated_at)
                VALUES (?, ?, ?, ?)
                ON CONFLICT(room_id) DO UPDATE SET
                  managed_by=excluded.managed_by,
-                 updated_at=excluded.updated_at""",
+                 updated_at=excluded.updated_at
+               WHERE rooms.managed_by IS NULL
+                  OR lower(rooms.managed_by) = excluded.managed_by""",
             (room_id, managed_by.lower(), now, now),
         )
         conn.commit()
     invalidate_managed_room_cache(room_id)
+    return cur.rowcount == 1
 
 
 def _delete_managed_room(room_id: str) -> None:
@@ -466,7 +476,13 @@ async def create_key(
     from .gateway import gateway as _gateway
     from .security import get_client_ip
 
-    dashboard_ok = x_dashboard_secret is not None and x_dashboard_secret == _DASHBOARD_SECRET
+    dashboard_ok = (
+        bool(_DASHBOARD_SECRET)
+        and x_dashboard_secret is not None
+        and hmac.compare_digest(
+            x_dashboard_secret.encode("utf-8"), _DASHBOARD_SECRET.encode("utf-8")
+        )
+    )
     if dashboard_ok:
         if not await _gateway.security.check_creation_allowed():
             raise HTTPException(status_code=429, detail="key_creation_rate_limited")
@@ -841,7 +857,8 @@ def create_group_room(
         if m and m.strip():
             members.add(m.strip().lower())
 
-    _persist_managed_room(room_id, managed_by)
+    if not _persist_managed_room(room_id, managed_by):
+        raise HTTPException(status_code=409, detail="room_already_managed_by_another_agent")
     for m in members:
         _add_agent_to_room_acl(room_id, m)
 
@@ -941,7 +958,8 @@ def add_room_member(
         except HTTPException:
             raise
         except Exception:
-            pass
+            logger.exception("priv_authz_failed room=%s", room_id)
+            raise HTTPException(status_code=500, detail="authorization_check_failed")
     else:
         raise HTTPException(status_code=400, detail="can_only_manage_private_or_group_rooms")
     _add_agent_to_room_acl(room_id, req.agent_id)
@@ -968,7 +986,8 @@ def remove_room_member(
         except HTTPException:
             raise
         except Exception:
-            pass
+            logger.exception("priv_authz_failed room=%s", room_id)
+            raise HTTPException(status_code=500, detail="authorization_check_failed")
     else:
         raise HTTPException(status_code=400, detail="can_only_manage_private_or_group_rooms")
     _remove_agent_from_room_acl(room_id, agent_id)

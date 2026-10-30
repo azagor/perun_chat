@@ -25,6 +25,7 @@ import io
 import json
 import logging
 import os
+import re
 import sys
 import time
 import uuid
@@ -33,6 +34,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("perunchat.mcp_bridge")
+
+# Perun proposal ids are ``prop_`` + 12 lowercase hex characters. Validate at
+# the tool boundary so malformed ids cannot allocate lock entries or reach the
+# wire; empty ids stay allowed for ops that do not use them (transfer_status).
+_PROPOSAL_ID_RE = re.compile(r"prop_[0-9a-f]{12}")
 
 try:
     from mcp.server import Server
@@ -550,6 +556,13 @@ class PerunChatMCPServer:
             raise ValueError(f"{key} is required")
         return value
 
+    def _proposal_id_argument(self, arguments: Dict[str, Any]) -> str:
+        """Return a validated Perun proposal id."""
+        value = self._string_argument(arguments, "proposal_id")
+        if not _PROPOSAL_ID_RE.fullmatch(value):
+            raise ValueError("proposal_id must match prop_<12 hex>")
+        return value
+
     def _chunk_bytes_arg(self, value: Any) -> int:
         """Validate ``chunk_bytes``; ``_upload_archive`` clamps the range."""
         if value is None:
@@ -939,7 +952,7 @@ class PerunChatMCPServer:
                     "Another rw participant must approve it, then it can be claimed."
                 )
             if name == "perunchat_claim_execution":
-                proposal_id = self._string_argument(arguments, "proposal_id")
+                proposal_id = self._proposal_id_argument(arguments)
                 async with self._proposal_lock_for(proposal_id):
                     since = self._control_seq
                     await self._send_execution(
@@ -953,7 +966,7 @@ class PerunChatMCPServer:
                     )
                 return _result_response(payload)
             if name == "perunchat_request_download_package":
-                proposal_id = self._string_argument(arguments, "proposal_id")
+                proposal_id = self._proposal_id_argument(arguments)
                 async with self._proposal_lock_for(proposal_id):
                     raw_destination = arguments.get("destination")
                     try:
@@ -1025,7 +1038,7 @@ class PerunChatMCPServer:
                         )
                     )
             if name == "perunchat_upload_package":
-                proposal_id = self._string_argument(arguments, "proposal_id")
+                proposal_id = self._proposal_id_argument(arguments)
                 zip_path = self._string_argument(arguments, "zip_path")
                 package_path = self._resolve_handoff_path(zip_path, "")
                 if not package_path.is_file():
@@ -1042,7 +1055,7 @@ class PerunChatMCPServer:
                     )
                 return _result_response(result)
             if name == "perunchat_write_target_file":
-                proposal_id = self._string_argument(arguments, "proposal_id")
+                proposal_id = self._proposal_id_argument(arguments)
                 target_path = self._string_argument(arguments, "path")
                 content = arguments.get("content")
                 if content is None:
@@ -1070,7 +1083,7 @@ class PerunChatMCPServer:
                     )
                 return _result_response(result)
             if name == "perunchat_execution_status":
-                proposal_id = self._string_argument(arguments, "proposal_id")
+                proposal_id = self._proposal_id_argument(arguments)
                 since = self._control_seq
                 await self._send_execution(
                     client,
@@ -1101,7 +1114,7 @@ class PerunChatMCPServer:
                 )
                 return _result_response(payload)
             if name == "perunchat_revoke_execution_claim":
-                proposal_id = self._string_argument(arguments, "proposal_id")
+                proposal_id = self._proposal_id_argument(arguments)
                 async with self._proposal_lock_for(proposal_id):
                     since = self._control_seq
                     await self._send_execution(

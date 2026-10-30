@@ -4,6 +4,30 @@
 
 _No unreleased changes yet._
 
+## 0.4.10 - 2026-10-30
+
+### Fixed
+
+- **Gateway ingress hardening.** Optional `PERUNCHAT_ALLOWED_ORIGINS` allowlist
+  (empty = no check, no Origin = allow); a 32 KiB pre-parse frame budget that
+  rises to the package budget only while a managed `grp:` room is joined; a
+  strike counter that closes after three malformed frames; a 50-room cap per
+  connection; and a 200-frame cap for a replaying socket.
+- **Frame filtering and lifecycle.** Frames are rebuilt from `ChatFrame` before
+  broadcast so unknown client keys cannot reach history or consumers; a
+  per-connection watchdog closes sockets whose API key was revoked; replay
+  blocked-sender lookups are cached per sender; `ROOM_LEAVE` no longer removes
+  durable membership when the socket never joined.
+- **Security primitives.** `AuthRateLimiter.attempt()` checks and records in one
+  critical section and prunes expired/stale keys; `SequenceValidator` commits
+  the sequence and nonce only after the skew/nonce/order checks pass, scopes
+  nonces by agent/runtime, and prunes them after twice the skew window.
+- **REST API.** Dashboard-secret comparisons use `hmac.compare_digest`; a
+  failed `priv:` authorization check returns 500 instead of falling through;
+  managed-room ownership is an atomic SQL guard (409 on conflict).
+- **MCP bridge.** `proposal_id` must match `prop_<12 hex>` at the tool boundary;
+  the per-proposal lock table is bounded to 256 idle entries.
+
 ## 0.4.9 - 2026-10-30
 
 ### Fixed

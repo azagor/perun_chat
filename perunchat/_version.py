@@ -1,3 +1,3 @@
 """Single source of truth for the perunchat package version."""
 
-__version__ = "0.4.9"
+__version__ = "0.4.10"

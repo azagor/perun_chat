@@ -168,7 +168,13 @@ class SequenceValidator:
 
     def __init__(self) -> None:
         self._last_seq: OrderedDict[str, int] = OrderedDict()
-        self._seen_nonces: Set[str] = set()
+        self._seen_nonces: Dict[str, int] = {}
+
+    def _prune_nonces(self, now_ms: int) -> None:
+        cutoff = now_ms - self.MAX_SKEW_MS * 2
+        stale = [key for key, ts in self._seen_nonces.items() if ts < cutoff]
+        for key in stale:
+            self._seen_nonces.pop(key, None)
 
     def validate(
         self,
@@ -183,22 +189,27 @@ class SequenceValidator:
         # may share an agent_id/API key and runtime. A per-client stream id keeps
         # their sequence counters separate.
         key = f"{agent_id}:{runtime}:{stream_id}"
-        last = self._last_seq.get(key, -1)
-        if sequence_number <= last:
-            return False, "non_monotonic_sequence"
-        self._last_seq[key] = sequence_number
-        self._last_seq.move_to_end(key)
-        if len(self._last_seq) > self.MAX_STREAMS:
-            self._last_seq.popitem(last=False)
-
         now_ms = int(time.time() * 1000)
         if abs(now_ms - timestamp_ms) > self.MAX_SKEW_MS:
             return False, "timestamp_skew"
 
+        self._prune_nonces(now_ms)
+        nonce_key = f"{agent_id}:{runtime}:{nonce}" if nonce is not None else ""
+        if nonce is not None and nonce_key in self._seen_nonces:
+            return False, "duplicate_nonce"
+
+        last = self._last_seq.get(key, -1)
+        if sequence_number <= last:
+            return False, "non_monotonic_sequence"
+
+        # Commit state only after every check has passed. A rejected frame must
+        # not burn its sequence number or nonce.
+        self._last_seq[key] = sequence_number
+        self._last_seq.move_to_end(key)
+        if len(self._last_seq) > self.MAX_STREAMS:
+            self._last_seq.popitem(last=False)
         if nonce is not None:
-            if nonce in self._seen_nonces:
-                return False, "duplicate_nonce"
-            self._seen_nonces.add(nonce)
+            self._seen_nonces[nonce_key] = now_ms
 
         return True, None
 
@@ -360,41 +371,68 @@ class TurnCounter:
 class AuthRateLimiter:
     """Separate, stricter rate limiter for authentication failures."""
 
+    MAX_KEYS = 10_000
+
     def __init__(self, capacity: int = 5, window_seconds: float = 60.0) -> None:
         self.capacity = capacity
         self.window_seconds = window_seconds
         self._failures: Dict[str, List[float]] = {}
         self._lock = asyncio.Lock()
 
+    def _prune_locked(self, now: float) -> None:
+        cutoff = now - self.window_seconds
+        stale = [
+            key for key, stamps in self._failures.items()
+            if not stamps or stamps[-1] < cutoff
+        ]
+        for key in stale:
+            self._failures.pop(key, None)
+        if len(self._failures) > self.MAX_KEYS:
+            ordered = sorted(
+                self._failures.items(),
+                key=lambda item: item[1][-1] if item[1] else 0.0,
+            )
+            for key, _ in ordered[: len(self._failures) - self.MAX_KEYS]:
+                self._failures.pop(key, None)
+
     async def record_failure(self, identifier: str) -> None:
         now = time.time()
         async with self._lock:
-            window = self._failures.setdefault(identifier, [])
-            cutoff = now - self.window_seconds
-            # Keep only failures inside the window
-            self._failures[identifier] = [t for t in window if t >= cutoff]
-            self._failures[identifier].append(now)
-
-    async def is_allowed(self, identifier: str) -> bool:
-        now = time.time()
-        async with self._lock:
-            window = self._failures.get(identifier, [])
-            cutoff = now - self.window_seconds
-            recent = [t for t in window if t >= cutoff]
-            self._failures[identifier] = recent
-            return len(recent) < self.capacity
-
-    async def attempt(self, identifier: str) -> bool:
-        """Record an attempt and return whether it is within the burst cap."""
-        allowed = await self.is_allowed(identifier)
-        now = time.time()
-        async with self._lock:
+            self._prune_locked(now)
             window = self._failures.get(identifier, [])
             cutoff = now - self.window_seconds
             recent = [t for t in window if t >= cutoff]
             recent.append(now)
             self._failures[identifier] = recent
-        return allowed
+
+    async def is_allowed(self, identifier: str) -> bool:
+        now = time.time()
+        async with self._lock:
+            self._prune_locked(now)
+            window = self._failures.get(identifier, [])
+            cutoff = now - self.window_seconds
+            recent = [t for t in window if t >= cutoff]
+            if recent:
+                self._failures[identifier] = recent
+            else:
+                self._failures.pop(identifier, None)
+            return len(recent) < self.capacity
+
+    async def attempt(self, identifier: str) -> bool:
+        """Record an attempt and return whether it is within the burst cap.
+
+        Check and append happen in one critical section so concurrent attempts
+        cannot both observe the last free slot.
+        """
+        now = time.time()
+        async with self._lock:
+            self._prune_locked(now)
+            cutoff = now - self.window_seconds
+            recent = [t for t in self._failures.get(identifier, []) if t >= cutoff]
+            allowed = len(recent) < self.capacity
+            recent.append(now)
+            self._failures[identifier] = recent
+            return allowed
 
 
 class SecurityPipeline:
