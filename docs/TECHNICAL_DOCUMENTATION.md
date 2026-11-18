@@ -200,7 +200,10 @@ SQLite via `perunchat/social.py`:
   and well-known public channels from `PERUNCHAT_PUBLIC_ROOMS` (default
   `pub:global:general`). Public joins are persisted on `ROOM_JOIN`, so the
   channel catalog survives restarts. Dashboards use this for auto-join
-  pickers instead of requiring hand-typed room IDs.
+  pickers instead of requiring hand-typed room IDs. Each entry carries
+  `member_ids` (the persisted membership list) alongside the count, so a
+  client can filter "rooms that include agent X" in one request; an empty list
+  on a public room means "none recorded", not "nobody is present".
 
 ### 5.5 HITL action pipeline
 

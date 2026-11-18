@@ -384,6 +384,41 @@ def test_rooms_group_room_joined_flag_via_acl(tmp_path, monkeypatch) -> None:
     assert rooms[grp]["members"] == 2
 
 
+def test_rooms_reports_full_membership_not_just_the_count(tmp_path, monkeypatch) -> None:
+    """``member_ids`` answers "which rooms include agent X" in one request.
+
+    The dashboard's per-friend chat list filters on this; without it a client
+    would need one ``/rooms/{id}/members`` call per room.
+    """
+    from perunchat import config as config_module
+    from perunchat import db as db_module
+    from perunchat.rooms import group_room_id
+
+    db_file = str(tmp_path / "catalog.db")
+    monkeypatch.setattr(config_module, "db_path", lambda: db_file)
+    db_module.init_db(db_file)
+    grp = group_room_id("acme", "proj", "standup")
+    with db_module.db(db_file) as conn:
+        conn.executemany(
+            "INSERT INTO room_members (room_id, agent_id, joined_at) VALUES (?, ?, ?)",
+            [
+                (grp, "rooms-agent", "2026-01-01T00:00:00+00:00"),
+                (grp, "teammate", "2026-01-01T00:00:00+00:00"),
+            ],
+        )
+        conn.commit()
+    gateway.rooms.add_member(grp, "rooms-agent")
+    gateway.rooms.add_member(grp, "teammate")
+
+    headers = _auth()
+    res = client.get("/api/v1/rooms", headers=headers)
+    rooms = {r["room_id"]: r for r in res.json()["rooms"]}
+    assert rooms[grp]["members"] == 2
+    assert rooms[grp]["member_ids"] == ["rooms-agent", "teammate"]
+    # A well-known public room with no persisted membership says so rather than
+    # guessing from live presence.
+    assert rooms["pub:global:general"]["member_ids"] == []
+
 
 def test_rooms_includes_online_members_and_count(tmp_path, monkeypatch):
     """Active rooms report the authenticated agents currently connected."""

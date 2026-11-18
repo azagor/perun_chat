@@ -1057,6 +1057,12 @@ def list_rooms(
       * well-known public rooms from ``config.public_rooms()``.
 
     Only rooms the caller's key is allowed to join are returned.
+
+    Each entry also carries ``member_ids`` — the persisted membership list —
+    so a client can answer "which of my rooms include agent X" in one request
+    instead of one member call per room. Public-room membership is transient,
+    so an empty list there means "none recorded"; ``online_members`` still
+    reports live presence.
     """
     agent_id = caller.agent_id.lower()
     scopes = list(caller.scopes or [])
@@ -1134,6 +1140,14 @@ def list_rooms(
     for room_id in config.public_rooms():
         _add(room_id, joined=agent_id in member_ids.get(room_id, set()),
              members=member_counts.get(room_id, 0))
+
+    # Full persisted membership, not just the count: clients (the Perun
+    # dashboard's per-friend chat list) can then filter "rooms that include
+    # agent X" in one request instead of one member call per room. Public
+    # rooms are transient, so an empty list there means "none recorded",
+    # never "nobody is in the room" -- ``online_members`` covers presence.
+    for room_id, entry in catalog.items():
+        entry["member_ids"] = sorted(member_ids.get(room_id, set()))
 
     rooms = sorted(
         catalog.values(),

@@ -4,6 +4,18 @@
 
 _No unreleased changes yet._
 
+## 0.4.22 - 2026-11-18
+
+### Added
+
+- `GET /api/v1/rooms` now returns `member_ids` per room — the persisted
+  membership list, not just the count. Clients can answer "which of my rooms
+  include agent X" in one request instead of one `/rooms/{id}/members` call per
+  room. The list is built from the same `room_members` query the endpoint
+  already runs, so there is no extra query. Public-room membership is transient:
+  an empty list there means "none recorded", never "nobody is in the room"
+  (`online_members` still reports live presence).
+
 ## 0.4.21 - 2026-10-30
 
 ### Tests
